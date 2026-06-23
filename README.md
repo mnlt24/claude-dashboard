@@ -213,7 +213,14 @@ check-ai --json   # JSON output for scripting
 
 ### `/claude-dashboard:update`
 
-Update the plugin and refresh the statusLine path in settings. Run after updating via git pull or marketplace.
+Migrate or repair the statusLine resolver.
+
+In recent versions, setup installs a **self-healing resolver** (`~/.claude/claude-dashboard-statusline.mjs`)
+that automatically picks the latest installed version at runtime. You no longer need to run
+`/claude-dashboard:update` after a plugin update.
+
+Run this command only if you installed claude-dashboard before the self-healing setup, or if the
+statusLine appears broken:
 
 ```bash
 /claude-dashboard:update

@@ -229,18 +229,65 @@ Preset characters: `M`=model, `C`=context, `b`=contextBar, `%`=contextPercentage
 
 ### 3. Update settings.json
 
-Add or update the statusLine configuration in `~/.claude/settings.json`:
+Add or update the statusLine configuration in `~/.claude/settings.json`.
 
-**Find the plugin path and update settings.json** (copy-paste one-liner):
+This setup uses a **self-healing resolver** (`~/.claude/claude-dashboard-statusline.mjs`) that
+automatically finds the latest installed version at runtime — no manual `/claude-dashboard:update`
+needed after plugin updates.
+
+**Step 3a — Install the resolver script**
+
+Copy the resolver from the installed plugin cache to the stable home path.
+This avoids inline duplication and ensures the home copy always matches the shipped source.
+
 ```bash
-SLPATH="$(ls -d ~/.claude/plugins/cache/claude-dashboard/claude-dashboard/*/dist/index.js 2>/dev/null | sort -V | tail -1)" node -e 'const fs=require("fs"),os=require("os"),p=os.homedir()+"/.claude/settings.json";const s=fs.existsSync(p)?JSON.parse(fs.readFileSync(p,"utf8")):{};s.statusLine={type:"command",command:"node "+process.env.SLPATH};fs.writeFileSync(p,JSON.stringify(s,null,2));'
+node -e "
+const fs = require('fs'), os = require('os'), path = require('path');
+const cacheBase = path.join(os.homedir(), '.claude', 'plugins', 'cache', 'claude-dashboard', 'claude-dashboard');
+// 최신 semver 버전 디렉터리 탐색
+const dirs = fs.existsSync(cacheBase)
+  ? fs.readdirSync(cacheBase, { withFileTypes: true })
+      .filter(e => e.isDirectory() && /^\d+\.\d+\.\d+$/.test(e.name))
+      .map(e => e.name)
+      .sort((a, b) => b.localeCompare(a, undefined, { numeric: true, sensitivity: 'base' }))
+  : [];
+const ver = dirs[0];
+if (!ver) {
+  console.error('Run /plugin update claude-dashboard to the latest version, then re-run this command (self-healing resolver ships in newer versions)');
+  process.exit(1);
+}
+const src = path.join(cacheBase, ver, 'scripts', 'statusline-resolver.mjs');
+if (!fs.existsSync(src)) {
+  console.error('Run /plugin update claude-dashboard to the latest version, then re-run this command (self-healing resolver ships in newer versions)');
+  process.exit(1);
+}
+const dst = path.join(os.homedir(), '.claude', 'claude-dashboard-statusline.mjs');
+fs.copyFileSync(src, dst);
+console.log('Resolver installed from v' + ver + ' →', dst);
+"
 ```
 
-This command:
-1. Finds the latest plugin version dynamically
-2. Updates `statusLine` in settings.json with the correct path
+**Step 3b — Update settings.json** (preserves existing keys):
 
-**IMPORTANT**: After updating the plugin via `/plugin update claude-dashboard`, run `/claude-dashboard:update` to update the statusLine path to the latest version.
+```bash
+node -e "
+const fs = require('fs'), os = require('os'), path = require('path');
+const p = path.join(os.homedir(), '.claude', 'settings.json');
+const resolver = path.join(os.homedir(), '.claude', 'claude-dashboard-statusline.mjs');
+const s = fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8')) : {};
+s.statusLine = s.statusLine || {};
+s.statusLine.type = 'command';
+s.statusLine.command = 'node \"' + resolver + '\"';
+fs.writeFileSync(p, JSON.stringify(s, null, 2));
+console.log('statusLine.command set to:', s.statusLine.command);
+"
+```
+
+These two steps:
+1. Copy the resolver from the plugin cache to `~/.claude/claude-dashboard-statusline.mjs` (single stable path)
+2. Point `statusLine.command` at that stable path — works across all future plugin updates
+
+**Self-healing**: After `/plugin update claude-dashboard`, the statusLine works automatically — no manual `/claude-dashboard:update` required.
 
 ## Examples
 
