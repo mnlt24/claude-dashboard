@@ -44,4 +44,5 @@ export const ICON = {
   speech: '💬️',
   target: '🎯️',
   key: '🔑️',
+  cloud: '☁️',
 } as const;

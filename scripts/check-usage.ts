@@ -11,7 +11,7 @@ import { fetchUsageLimits } from './utils/api-client.js';
 import { fetchCodexUsage, isCodexInstalled } from './utils/codex-client.js';
 import { fetchGeminiUsage, isGeminiInstalled } from './utils/gemini-client.js';
 import { fetchZaiUsage, isZaiInstalled, type ZaiUsageLimits } from './utils/zai-api-client.js';
-import { isZaiProvider } from './utils/provider.js';
+import { usesAnthropicRateLimits } from './utils/provider.js';
 import { formatTimeRemaining } from './utils/formatters.js';
 import { getColorForPercent, colorize, COLORS } from './utils/colors.js';
 import { ICON } from './utils/emoji.js';
@@ -213,8 +213,9 @@ export function calculateRecommendation(
   const candidates: { name: string; score: number }[] = [];
 
   // Claude score (lower is better - using 5h as primary metric)
-  // Exclude from recommendations when using z.ai provider (different quota system)
-  if (!isZaiProvider() && !claudeUsage.error && claudeUsage.fiveHourPercent !== null) {
+  // Exclude from recommendations for non-Anthropic providers (z.ai/ZHIPU/Bedrock/Vertex):
+  // their sessions don't use Anthropic subscription rate limits, so 5h % is inapplicable.
+  if (usesAnthropicRateLimits() && !claudeUsage.error && claudeUsage.fiveHourPercent !== null) {
     candidates.push({ name: 'claude', score: claudeUsage.fiveHourPercent });
   }
 

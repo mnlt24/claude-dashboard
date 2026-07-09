@@ -75,6 +75,23 @@ describe('rate-limit widgets', () => {
       expect(result).toContain('5h');
       expect(result).toContain('75%');
     });
+
+    it('should return null (not a warning) when using Bedrock, even if rateLimits is null', async () => {
+      const original = process.env.CLAUDE_CODE_USE_BEDROCK;
+      process.env.CLAUDE_CODE_USE_BEDROCK = '1';
+      try {
+        const ctx = createContext(null);
+        const data = await rateLimit5hWidget.getData(ctx);
+
+        expect(data).toBeNull();
+      } finally {
+        if (original !== undefined) {
+          process.env.CLAUDE_CODE_USE_BEDROCK = original;
+        } else {
+          delete process.env.CLAUDE_CODE_USE_BEDROCK;
+        }
+      }
+    });
   });
 
   describe('rateLimit7dWidget', () => {

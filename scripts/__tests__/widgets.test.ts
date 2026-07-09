@@ -269,6 +269,24 @@ describe('widgets', () => {
       expect(result).toContain('(H)');
       expect(result).not.toContain('↯');
     });
+
+    it('should render cloud icon (not ◆) when using Bedrock', () => {
+      const original = process.env.CLAUDE_CODE_USE_BEDROCK;
+      process.env.CLAUDE_CODE_USE_BEDROCK = '1';
+      try {
+        const ctx = createContext();
+        const result = modelWidget.render(createModelData(), ctx);
+
+        expect(result).toContain(ICON.cloud);
+        expect(result).not.toContain('◆');
+      } finally {
+        if (original !== undefined) {
+          process.env.CLAUDE_CODE_USE_BEDROCK = original;
+        } else {
+          delete process.env.CLAUDE_CODE_USE_BEDROCK;
+        }
+      }
+    });
   });
 
   describe('getDefaultEffort', () => {

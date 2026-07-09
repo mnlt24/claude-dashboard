@@ -1050,7 +1050,16 @@ async function fetchFromGeminiApi(credentials, projectId) {
 }
 
 // scripts/utils/provider.ts
+function isTruthyFlag(v) {
+  return v === "1" || v?.toLowerCase() === "true";
+}
 function detectProvider() {
+  if (isTruthyFlag(process.env.CLAUDE_CODE_USE_BEDROCK) || isTruthyFlag(process.env.CLAUDE_CODE_USE_MANTLE)) {
+    return "bedrock";
+  }
+  if (isTruthyFlag(process.env.CLAUDE_CODE_USE_VERTEX)) {
+    return "vertex";
+  }
   const baseUrl = process.env.ANTHROPIC_BASE_URL || "";
   if (baseUrl.includes("api.z.ai")) {
     return "zai";
@@ -1063,6 +1072,9 @@ function detectProvider() {
 function isZaiProvider() {
   const provider = detectProvider();
   return provider === "zai" || provider === "zhipu";
+}
+function usesAnthropicRateLimits() {
+  return detectProvider() === "anthropic";
 }
 function getZaiApiBaseUrl() {
   const baseUrl = process.env.ANTHROPIC_BASE_URL;
@@ -1645,7 +1657,8 @@ var ICON = {
   fire: "\u{1F525}\uFE0F",
   speech: "\u{1F4AC}\uFE0F",
   target: "\u{1F3AF}\uFE0F",
-  key: "\u{1F511}\uFE0F"
+  key: "\u{1F511}\uFE0F",
+  cloud: "\u2601\uFE0F"
 };
 
 // locales/en.json
@@ -1890,7 +1903,7 @@ function renderGeminiSection(usage, geminiData, t) {
 }
 function calculateRecommendation(claudeUsage, codexUsage, geminiUsage, zaiUsage, t) {
   const candidates = [];
-  if (!isZaiProvider() && !claudeUsage.error && claudeUsage.fiveHourPercent !== null) {
+  if (usesAnthropicRateLimits() && !claudeUsage.error && claudeUsage.fiveHourPercent !== null) {
     candidates.push({ name: "claude", score: claudeUsage.fiveHourPercent });
   }
   if (codexUsage && codexUsage.available && !codexUsage.error && codexUsage.fiveHourPercent !== null) {

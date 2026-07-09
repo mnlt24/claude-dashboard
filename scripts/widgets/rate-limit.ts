@@ -1,8 +1,9 @@
 /**
  * Rate limit widgets - displays 5h and 7d usage limits
  * @handbook 6.2-stale-while-error
- * Note: These widgets return null when using z.ai provider,
- * allowing zaiUsage widget to display instead.
+ * Note: These widgets return null for non-Anthropic providers
+ * (z.ai/ZHIPU/Bedrock/Vertex) which don't use Anthropic subscription rate limits.
+ * z.ai/ZHIPU show the zaiUsage widget instead; Bedrock/Vertex show nothing in its place.
  * @handbook 3.3-widget-data-sources
  * @handbook 7.2-provider-detection
  * @tested scripts/__tests__/rate-limit.test.ts
@@ -13,7 +14,7 @@ import type { WidgetContext, RateLimitData, UsageLimits } from '../types.js';
 import { getColorForPercent, colorize, getTheme } from '../utils/colors.js';
 import { ICON } from '../utils/emoji.js';
 import { formatTimeRemaining } from '../utils/formatters.js';
-import { isZaiProvider } from '../utils/provider.js';
+import { usesAnthropicRateLimits } from '../utils/provider.js';
 
 type LabelKey = '5h' | '7d_all' | '7d_sonnet';
 type LimitKey = keyof UsageLimits;
@@ -42,10 +43,11 @@ function getLimitData(limits: UsageLimits | null | undefined, key: LimitKey): Ra
 }
 
 /**
- * Check if Anthropic rate limits should be hidden (z.ai uses different quota system)
+ * Check if Anthropic rate limits should be hidden (non-Anthropic providers
+ * — z.ai/ZHIPU/Bedrock/Vertex — use different quota systems or none at all)
  */
 function shouldHideAnthropicLimits(): boolean {
-  return isZaiProvider();
+  return !usesAnthropicRateLimits();
 }
 
 /**

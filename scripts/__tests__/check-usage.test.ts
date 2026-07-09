@@ -332,4 +332,24 @@ describe('calculateRecommendation', () => {
     expect(result.name).not.toBeNull();
     expect(result.reason).toContain('25%');
   });
+
+  it('should exclude Claude under Bedrock even with valid 5h data (rate limits not applicable)', () => {
+    // A machine may still have a cached Anthropic OAuth token while the session
+    // runs on Bedrock — Claude must not be recommended off inapplicable subscription data.
+    const original = process.env.CLAUDE_CODE_USE_BEDROCK;
+    process.env.CLAUDE_CODE_USE_BEDROCK = '1';
+    try {
+      const claude = createUsage({ name: 'Claude', fiveHourPercent: 5 });
+      const codex = createUsage({ name: 'Codex', fiveHourPercent: 40 });
+
+      const result = calculateRecommendation(claude, codex, null, null, MOCK_TRANSLATIONS);
+      expect(result.name).toBe('codex');
+    } finally {
+      if (original !== undefined) {
+        process.env.CLAUDE_CODE_USE_BEDROCK = original;
+      } else {
+        delete process.env.CLAUDE_CODE_USE_BEDROCK;
+      }
+    }
+  });
 });

@@ -482,7 +482,8 @@ var ICON = {
   fire: "\u{1F525}\uFE0F",
   speech: "\u{1F4AC}\uFE0F",
   target: "\u{1F3AF}\uFE0F",
-  key: "\u{1F511}\uFE0F"
+  key: "\u{1F511}\uFE0F",
+  cloud: "\u2601\uFE0F"
 };
 
 // scripts/utils/api-client.ts
@@ -1085,7 +1086,16 @@ function osc8Link(url, text) {
 }
 
 // scripts/utils/provider.ts
+function isTruthyFlag(v) {
+  return v === "1" || v?.toLowerCase() === "true";
+}
 function detectProvider() {
+  if (isTruthyFlag(process.env.CLAUDE_CODE_USE_BEDROCK) || isTruthyFlag(process.env.CLAUDE_CODE_USE_MANTLE)) {
+    return "bedrock";
+  }
+  if (isTruthyFlag(process.env.CLAUDE_CODE_USE_VERTEX)) {
+    return "vertex";
+  }
   const baseUrl = process.env.ANTHROPIC_BASE_URL || "";
   if (baseUrl.includes("api.z.ai")) {
     return "zai";
@@ -1098,6 +1108,9 @@ function detectProvider() {
 function isZaiProvider() {
   const provider = detectProvider();
   return provider === "zai" || provider === "zhipu";
+}
+function usesAnthropicRateLimits() {
+  return detectProvider() === "anthropic";
 }
 function getZaiApiBaseUrl() {
   const baseUrl = process.env.ANTHROPIC_BASE_URL;
@@ -1154,6 +1167,18 @@ async function getModelSettings(modelId) {
   }
   return { effortLevel: defaultEffort, fastMode: false };
 }
+function getProviderIcon() {
+  switch (detectProvider()) {
+    case "bedrock":
+    case "vertex":
+      return ICON.cloud;
+    case "zai":
+    case "zhipu":
+      return ICON.orangeCircle;
+    default:
+      return "\u25C6";
+  }
+}
 var modelWidget = {
   id: "model",
   name: "Model",
@@ -1170,7 +1195,7 @@ var modelWidget = {
   },
   render(data) {
     const shortName = shortenModelName(data.displayName);
-    const icon = isZaiProvider() ? ICON.orangeCircle : "\u25C6";
+    const icon = getProviderIcon();
     const supportsEffort = shortName === "Opus" || shortName === "Sonnet";
     const effortSuffix = supportsEffort ? `(${data.effortLevel[0].toUpperCase()})` : "";
     const fastIndicator = shortName === "Opus" && data.fastMode ? " \u21AF" : "";
@@ -1296,7 +1321,7 @@ function getLimitData(limits, key) {
   };
 }
 function shouldHideAnthropicLimits() {
-  return isZaiProvider();
+  return !usesAnthropicRateLimits();
 }
 var rateLimit5hWidget = {
   id: "rateLimit5h",

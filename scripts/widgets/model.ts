@@ -16,7 +16,7 @@ import type { WidgetContext, ModelData, EffortLevel } from '../types.js';
 import { RESET, getTheme } from '../utils/colors.js';
 import { ICON } from '../utils/emoji.js';
 import { shortenModelName } from '../utils/formatters.js';
-import { isZaiProvider } from '../utils/provider.js';
+import { detectProvider } from '../utils/provider.js';
 
 const EFFORT_LEVELS = new Set<string>(['xhigh', 'high', 'medium', 'low']);
 
@@ -78,6 +78,24 @@ async function getModelSettings(modelId: string): Promise<ModelSettings> {
   return { effortLevel: defaultEffort, fastMode: false };
 }
 
+/**
+ * Model badge icon per detected provider.
+ * Bedrock/Vertex get a cloud icon (AWS/GCP-hosted, not a direct Anthropic subscription).
+ * z.ai/ZHIPU keep their existing orange-circle badge. Anthropic (default) keeps `◆`.
+ */
+function getProviderIcon(): string {
+  switch (detectProvider()) {
+    case 'bedrock':
+    case 'vertex':
+      return ICON.cloud;
+    case 'zai':
+    case 'zhipu':
+      return ICON.orangeCircle;
+    default:
+      return '◆';
+  }
+}
+
 export const modelWidget: Widget<ModelData> = {
   id: 'model',
   name: 'Model',
@@ -97,7 +115,7 @@ export const modelWidget: Widget<ModelData> = {
 
   render(data: ModelData): string {
     const shortName = shortenModelName(data.displayName);
-    const icon = isZaiProvider() ? ICON.orangeCircle : '◆';
+    const icon = getProviderIcon();
 
     // Haiku excluded from effort badge
     const supportsEffort = shortName === 'Opus' || shortName === 'Sonnet';
