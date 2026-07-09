@@ -174,4 +174,103 @@ describe('zai-api-client', () => {
       expect(result).toMatchObject({ tokensPercent: 25, mcpPercent: 10 });
     });
   });
+
+  describe('fetchZaiUsage cacheOnly', () => {
+    const originalToken = process.env.ANTHROPIC_AUTH_TOKEN;
+    const originalBase = process.env.ANTHROPIC_BASE_URL;
+
+    beforeEach(() => {
+      vi.resetModules();
+      process.env.ANTHROPIC_AUTH_TOKEN = 'zai-test-token';
+      process.env.ANTHROPIC_BASE_URL = 'https://api.z.ai/anthropic';
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+      vi.doUnmock('../utils/file-cache.js');
+      if (originalToken === undefined) delete process.env.ANTHROPIC_AUTH_TOKEN;
+      else process.env.ANTHROPIC_AUTH_TOKEN = originalToken;
+      if (originalBase === undefined) delete process.env.ANTHROPIC_BASE_URL;
+      else process.env.ANTHROPIC_BASE_URL = originalBase;
+    });
+
+    it('returns null without calling network when cacheOnly is true and no cache (fresh or stale) exists', async () => {
+      vi.doMock('../utils/file-cache.js', () => ({
+        loadFileCache: vi.fn().mockResolvedValue(null),
+        saveFileCache: vi.fn(),
+        fileCachePath: (name: string) => `/tmp/${name}`,
+        FILE_CACHE_DIR: '/tmp',
+        STALE_CACHE_TTL_SECONDS: 3600,
+      }));
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response('{}', { status: 200 })
+      );
+
+      const { fetchZaiUsage, clearZaiCache } = await import('../utils/zai-api-client.js');
+      clearZaiCache();
+
+      const result = await fetchZaiUsage(60, { cacheOnly: true });
+
+      expect(result).toBeNull();
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('returns stale file cache without calling network when cacheOnly is true', async () => {
+      const staleSample = {
+        model: 'glm-4.6',
+        tokensPercent: 60,
+        tokensResetAt: Date.now() + 3_600_000,
+        mcpPercent: 15,
+        mcpResetAt: Date.now() + 30 * 86_400_000,
+      };
+
+      const loadFileCacheMock = vi
+        .fn()
+        .mockResolvedValueOnce(null) // fresh-ttl check misses
+        .mockResolvedValueOnce({ data: staleSample, timestamp: Date.now() - 7_000_000 }); // stale fallback hits
+
+      vi.doMock('../utils/file-cache.js', () => ({
+        loadFileCache: loadFileCacheMock,
+        saveFileCache: vi.fn(),
+        fileCachePath: (name: string) => `/tmp/${name}`,
+        FILE_CACHE_DIR: '/tmp',
+        STALE_CACHE_TTL_SECONDS: 3600,
+      }));
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response('{}', { status: 200 })
+      );
+
+      const { fetchZaiUsage, clearZaiCache } = await import('../utils/zai-api-client.js');
+      clearZaiCache();
+
+      const result = await fetchZaiUsage(60, { cacheOnly: true });
+
+      expect(result).toEqual(staleSample);
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(loadFileCacheMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('falls through to network fetch when cacheOnly is omitted (existing full behavior)', async () => {
+      vi.doMock('../utils/file-cache.js', () => ({
+        loadFileCache: vi.fn().mockResolvedValue(null),
+        saveFileCache: vi.fn(),
+        fileCachePath: (name: string) => `/tmp/${name}`,
+        FILE_CACHE_DIR: '/tmp',
+        STALE_CACHE_TTL_SECONDS: 3600,
+      }));
+
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(JSON.stringify({ data: { limits: [] } }), { status: 200 })
+      );
+
+      const { fetchZaiUsage, clearZaiCache } = await import('../utils/zai-api-client.js');
+      clearZaiCache();
+
+      await fetchZaiUsage(60);
+
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    });
+  });
 });

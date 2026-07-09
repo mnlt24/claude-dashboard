@@ -385,4 +385,107 @@ describe('gemini-client', () => {
       expect(result).toBeTruthy();
     });
   });
+
+  describe('fetchGeminiUsage cacheOnly', () => {
+    const originalProject = process.env.GOOGLE_CLOUD_PROJECT;
+    const credsJson = JSON.stringify({
+      access_token: 'gemini-token',
+      refresh_token: 'gemini-refresh',
+      expiry_date: Date.now() + 3_600_000, // future — no refresh needed
+    });
+
+    beforeEach(async () => {
+      vi.resetModules();
+      // Use env var to short-circuit getProjectId so we don't need to mock loadCodeAssist API
+      process.env.GOOGLE_CLOUD_PROJECT = 'test-project';
+      // Force keychain to fail so the credentials file path is taken
+      const { execFileSync } = await import('child_process');
+      vi.mocked(execFileSync).mockImplementation(() => {
+        throw new Error('mock: keychain unavailable');
+      });
+    });
+
+    afterEach(() => {
+      vi.restoreAllMocks();
+      vi.doUnmock('../utils/file-cache.js');
+      vi.doUnmock('fs/promises');
+      if (originalProject === undefined) delete process.env.GOOGLE_CLOUD_PROJECT;
+      else process.env.GOOGLE_CLOUD_PROJECT = originalProject;
+    });
+
+    it('returns null without calling network when cacheOnly is true and no cache (fresh or stale) exists', async () => {
+      vi.doMock('fs/promises', async (importOriginal) => {
+        const actual = await importOriginal<typeof import('fs/promises')>();
+        return {
+          ...actual,
+          stat: vi.fn().mockResolvedValue({ mtimeMs: 12345 }),
+          readFile: vi.fn().mockResolvedValue(credsJson),
+        };
+      });
+
+      vi.doMock('../utils/file-cache.js', () => ({
+        loadFileCache: vi.fn().mockResolvedValue(null),
+        saveFileCache: vi.fn(),
+        fileCachePath: (name: string) => `/tmp/${name}`,
+        FILE_CACHE_DIR: '/tmp',
+        STALE_CACHE_TTL_SECONDS: 3600,
+      }));
+
+      // .mockClear() guards against stray call history bleeding in from
+      // earlier tests in this file that assign `global.fetch = vi.fn()...`
+      // directly (bypassing vi.spyOn's restore chain) rather than spying.
+      const fetchSpy = vi.spyOn(globalThis, 'fetch')
+        .mockResolvedValue(new Response('{}', { status: 200 }))
+        .mockClear();
+
+      const { fetchGeminiUsage, clearGeminiCache } = await import('../utils/gemini-client.js');
+      clearGeminiCache();
+
+      const result = await fetchGeminiUsage(60, { cacheOnly: true });
+
+      expect(result).toBeNull();
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+
+    it('returns stale file cache without calling network when cacheOnly is true', async () => {
+      const staleSample = {
+        model: 'gemini-2.0-flash',
+        usedPercent: 80,
+        resetAt: new Date(Date.now() + 86_400_000).toISOString(),
+        buckets: [],
+      };
+
+      vi.doMock('fs/promises', async (importOriginal) => {
+        const actual = await importOriginal<typeof import('fs/promises')>();
+        return {
+          ...actual,
+          stat: vi.fn().mockResolvedValue({ mtimeMs: 12345 }),
+          readFile: vi.fn().mockResolvedValue(credsJson),
+        };
+      });
+
+      vi.doMock('../utils/file-cache.js', () => ({
+        loadFileCache: vi.fn().mockResolvedValue({ data: staleSample, timestamp: Date.now() - 7_000_000 }),
+        saveFileCache: vi.fn(),
+        fileCachePath: (name: string) => `/tmp/${name}`,
+        FILE_CACHE_DIR: '/tmp',
+        STALE_CACHE_TTL_SECONDS: 3600,
+      }));
+
+      // .mockClear() guards against stray call history bleeding in from
+      // earlier tests in this file that assign `global.fetch = vi.fn()...`
+      // directly (bypassing vi.spyOn's restore chain) rather than spying.
+      const fetchSpy = vi.spyOn(globalThis, 'fetch')
+        .mockResolvedValue(new Response('{}', { status: 200 }))
+        .mockClear();
+
+      const { fetchGeminiUsage, clearGeminiCache } = await import('../utils/gemini-client.js');
+      clearGeminiCache();
+
+      const result = await fetchGeminiUsage(60, { cacheOnly: true });
+
+      expect(result).toEqual(staleSample);
+      expect(fetchSpy).not.toHaveBeenCalled();
+    });
+  });
 });

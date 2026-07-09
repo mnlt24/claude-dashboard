@@ -46,7 +46,7 @@ export const geminiUsageWidget: Widget<GeminiUsageData> = {
       return null;
     }
 
-    const limits = await fetchGeminiUsage(ctx.config.cache.ttlSeconds);
+    const limits = await fetchGeminiUsage(ctx.config.cache.ttlSeconds, { cacheOnly: ctx.fast });
     debugLog('gemini', 'fetchGeminiUsage result:', limits);
     if (!limits) {
       // Return error state instead of null to show warning indicator
@@ -95,7 +95,7 @@ export const geminiUsageAllWidget: Widget<GeminiUsageAllData> = {
       return null;
     }
 
-    const limits = await fetchGeminiUsage(ctx.config.cache.ttlSeconds);
+    const limits = await fetchGeminiUsage(ctx.config.cache.ttlSeconds, { cacheOnly: ctx.fast });
     debugLog('gemini', 'geminiUsageAll - fetchGeminiUsage result:', limits);
     if (!limits) {
       return {

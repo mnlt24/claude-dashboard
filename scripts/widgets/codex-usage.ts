@@ -9,7 +9,7 @@ import type { Widget } from './base.js';
 import type { WidgetContext, CodexUsageData } from '../types.js';
 import { getColorForPercent, colorize, getTheme } from '../utils/colors.js';
 import { ICON } from '../utils/emoji.js';
-import { isCodexInstalled, fetchCodexUsage } from '../utils/codex-client.js';
+import { isCodexInstalled, fetchCodexUsage, getCodexModel } from '../utils/codex-client.js';
 import { formatTimeRemaining } from '../utils/formatters.js';
 import { debugLog } from '../utils/debug.js';
 
@@ -46,12 +46,18 @@ export const codexUsageWidget: Widget<CodexUsageData> = {
       return null;
     }
 
-    const limits = await fetchCodexUsage(ctx.config.cache.ttlSeconds);
+    // Fast render path: skip codex exec model detection (can block ~8s on a
+    // cold model cache). Runs alongside fetchCodexUsage since both only need
+    // config.toml/cached-detection/file-cache reads, not each other's result.
+    const [modelHint, limits] = await Promise.all([
+      getCodexModel({ cacheOnly: ctx.fast }),
+      fetchCodexUsage(ctx.config.cache.ttlSeconds, { cacheOnly: ctx.fast }),
+    ]);
     debugLog('codex', 'fetchCodexUsage result:', limits);
     if (!limits) {
       // Return error state instead of null to show warning indicator
       return {
-        model: 'codex',
+        model: modelHint ?? 'codex',
         planType: '',
         primaryPercent: null,
         primaryResetAt: null,
@@ -62,7 +68,7 @@ export const codexUsageWidget: Widget<CodexUsageData> = {
     }
 
     return {
-      model: limits.model,
+      model: modelHint ?? limits.model,
       planType: limits.planType,
       primaryPercent: limits.primary?.usedPercent ?? null,
       primaryResetAt: limits.primary?.resetAt ?? null,

@@ -251,32 +251,22 @@ async function fetchUsageLimitsInner(ttlSeconds = 300) {
     pendingRequests.delete(tokenHash);
   }
 }
-async function staleAfterDeadline() {
-  if (!lastTokenHash)
-    return null;
-  return loadFileCache2(lastTokenHash, STALE_FALLBACK_SECONDS);
+async function fetchUsageLimitsCacheOnly() {
+  const token = await getCredentials();
+  if (!token) {
+    if (!lastTokenHash)
+      return null;
+    return loadFileCache2(lastTokenHash, STALE_FALLBACK_SECONDS);
+  }
+  const tokenHash = hashToken(token);
+  lastTokenHash = tokenHash;
+  return loadFileCache2(tokenHash, STALE_FALLBACK_SECONDS);
 }
 async function fetchUsageLimits(ttlSeconds = 300, opts) {
-  const inner = fetchUsageLimitsInner(ttlSeconds);
-  const deadlineMs = opts?.deadlineMs;
-  if (!deadlineMs)
-    return inner;
-  inner.catch(() => {
-  });
-  let timer;
-  const deadline = new Promise((resolve) => {
-    timer = setTimeout(() => {
-      debugLog("api", `usage fetch exceeded ${deadlineMs}ms deadline; serving stale`);
-      resolve(staleAfterDeadline());
-    }, deadlineMs);
-    timer.unref?.();
-  });
-  try {
-    return await Promise.race([inner, deadline]);
-  } finally {
-    if (timer)
-      clearTimeout(timer);
+  if (opts?.cacheOnly) {
+    return fetchUsageLimitsCacheOnly();
   }
+  return fetchUsageLimitsInner(ttlSeconds);
 }
 async function makeRequest(token) {
   const controller = new AbortController();
@@ -493,6 +483,17 @@ async function saveModelCache(model, configMtime) {
 }
 var modelDetectionFailedAt = null;
 var MODEL_DETECTION_BACKOFF_MS = 3e5;
+var pendingModelDetection = null;
+function detectModelFromCodexExecDeduped() {
+  if (pendingModelDetection) {
+    debugLog("codex", "detectModelFromCodexExecDeduped: reusing in-flight detection");
+    return pendingModelDetection;
+  }
+  pendingModelDetection = detectModelFromCodexExec().finally(() => {
+    pendingModelDetection = null;
+  });
+  return pendingModelDetection;
+}
 async function detectModelFromCodexExec() {
   if (modelDetectionFailedAt !== null && Date.now() - modelDetectionFailedAt < MODEL_DETECTION_BACKOFF_MS) {
     debugLog("codex", "detectModelFromCodexExec: skipping (backoff)");
@@ -527,7 +528,7 @@ async function detectModelFromCodexExec() {
     return null;
   }
 }
-async function getCodexModel() {
+async function getCodexModel(opts) {
   const configModel = await getModelFromConfig();
   if (configModel) {
     debugLog("codex", "getCodexModel: from config", configModel);
@@ -538,14 +539,18 @@ async function getCodexModel() {
   if (cachedModel) {
     return cachedModel;
   }
-  const detectedModel = await detectModelFromCodexExec();
+  if (opts?.cacheOnly) {
+    debugLog("codex", "getCodexModel: cacheOnly, skipping codex exec detection");
+    return null;
+  }
+  const detectedModel = await detectModelFromCodexExecDeduped();
   if (detectedModel) {
     await saveModelCache(detectedModel, configMtime);
     return detectedModel;
   }
   return null;
 }
-async function fetchCodexUsage(ttlSeconds = 60) {
+async function fetchCodexUsage(ttlSeconds = 60, opts) {
   const auth = await getCodexAuth();
   if (!auth) {
     return null;
@@ -569,6 +574,11 @@ async function fetchCodexUsage(ttlSeconds = 60) {
     debugLog("codex", "file cache hit");
     codexCacheMap.set(tokenHash, { data: fromFile.data, timestamp: fromFile.timestamp });
     return fromFile.data;
+  }
+  if (opts?.cacheOnly) {
+    debugLog("codex", "cacheOnly: no fresh cache, checking stale fallback");
+    const staleFile = await loadFileCache(cacheFile, STALE_CACHE_TTL_SECONDS);
+    return staleFile?.data ?? null;
   }
   const pending = pendingRequests2.get(tokenHash);
   if (pending) {
@@ -941,7 +951,26 @@ async function getProjectId(credentials) {
   }
   return null;
 }
-async function fetchGeminiUsage(ttlSeconds = 60) {
+async function fetchGeminiUsageCacheOnly() {
+  const credentials = await getGeminiCredentials();
+  if (!credentials) {
+    debugLog("gemini", "fetchGeminiUsageCacheOnly: no local credentials");
+    return null;
+  }
+  const tokenHash = hashToken(credentials.accessToken);
+  const cacheFile = fileCachePath(`gemini-usage-${tokenHash}.json`);
+  const cached = geminiCacheMap.get(tokenHash);
+  if (cached && !cached.isError) {
+    debugLog("gemini", "fetchGeminiUsageCacheOnly: memory cache hit");
+    return cached.data;
+  }
+  const fromFile = await loadFileCache(cacheFile, STALE_CACHE_TTL_SECONDS);
+  return fromFile?.data ?? null;
+}
+async function fetchGeminiUsage(ttlSeconds = 60, opts) {
+  if (opts?.cacheOnly) {
+    return fetchGeminiUsageCacheOnly();
+  }
   const credentials = await getValidCredentials();
   if (!credentials) {
     debugLog("gemini", "fetchGeminiUsage: no valid credentials");
@@ -1169,7 +1198,7 @@ function isZaiInstalled() {
 function getZaiAuthToken() {
   return process.env.ANTHROPIC_AUTH_TOKEN || null;
 }
-async function fetchZaiUsage(ttlSeconds = 60) {
+async function fetchZaiUsage(ttlSeconds = 60, opts) {
   if (!isZaiProvider()) {
     debugLog("zai", "fetchZaiUsage: not a z.ai provider");
     return null;
@@ -1201,6 +1230,11 @@ async function fetchZaiUsage(ttlSeconds = 60) {
     debugLog("zai", "file cache hit");
     zaiCacheMap.set(cacheKey, { data: fromFile.data, timestamp: fromFile.timestamp });
     return fromFile.data;
+  }
+  if (opts?.cacheOnly) {
+    debugLog("zai", "cacheOnly: no fresh cache, checking stale fallback");
+    const staleFile = await loadFileCache(cacheFile, STALE_CACHE_TTL_SECONDS);
+    return staleFile?.data ?? null;
   }
   const pending = pendingRequests4.get(cacheKey);
   if (pending) {

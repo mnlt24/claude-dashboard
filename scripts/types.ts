@@ -397,6 +397,13 @@ export interface WidgetContext {
   translations: Translations;
   /** Cached API rate limits */
   rateLimits?: UsageLimits | null;
+  /**
+   * True for hot-path renders (the statusline entry point spawns a fresh
+   * process per render and must return quickly). When true, widgets must use
+   * cache-only data paths instead of slow network/subprocess calls; cache
+   * warming happens out-of-band via a detached background refresh process.
+   */
+  fast?: boolean;
 }
 
 /**

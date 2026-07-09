@@ -482,9 +482,100 @@ describe('api-client', () => {
     });
   });
 
-  describe('fetchUsageLimits deadline (stale-while-revalidate)', () => {
-    it('should behave exactly like the pre-deadline implementation when deadlineMs is omitted', async () => {
-      const testToken = 'deadline-omitted-token';
+  describe('fetchUsageLimits cacheOnly (hot-path render mode)', () => {
+    it('should return file cache without touching the network when cacheOnly is true', async () => {
+      const testToken = 'cacheonly-hit-token';
+      const tokenHash = hashToken(testToken);
+
+      const { getCredentials } = await import('../utils/credentials.js');
+      vi.mocked(getCredentials).mockResolvedValue(testToken);
+
+      const cachedLimits = {
+        five_hour: { utilization: 0.33, resets_at: '2024-01-01T00:00:00Z' },
+        seven_day: null,
+        seven_day_sonnet: null,
+      };
+      await mkdir(ACTUAL_CACHE_DIR, { recursive: true, mode: 0o700 });
+      await writeFile(
+        path.join(ACTUAL_CACHE_DIR, `cache-${tokenHash}.json`),
+        JSON.stringify({ data: cachedLimits, timestamp: Date.now() - 600_000 }),
+        { mode: 0o600 }
+      );
+
+      const fetchMock = vi.fn();
+      global.fetch = fetchMock;
+
+      const { fetchUsageLimits, clearCache } = await import('../utils/api-client.js');
+      clearCache();
+
+      const result = await fetchUsageLimits(300, { cacheOnly: true });
+
+      expect(result).not.toBeNull();
+      expect(result?.five_hour?.utilization).toBe(0.33);
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      await deleteFileCacheForToken(testToken);
+    });
+
+    it('should return null without touching the network when cacheOnly is true and no cache exists', async () => {
+      const testToken = 'cacheonly-miss-token';
+      const { getCredentials } = await import('../utils/credentials.js');
+      vi.mocked(getCredentials).mockResolvedValue(testToken);
+      await deleteFileCacheForToken(testToken);
+
+      const fetchMock = vi.fn();
+      global.fetch = fetchMock;
+
+      const { fetchUsageLimits, clearCache } = await import('../utils/api-client.js');
+      clearCache();
+
+      const result = await fetchUsageLimits(300, { cacheOnly: true });
+
+      expect(result).toBeNull();
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it('should fall back to lastTokenHash cache when cacheOnly is true and credentials become unavailable', async () => {
+      const testToken = 'cacheonly-notoken-fallback-token';
+      const tokenHash = hashToken(testToken);
+      const { getCredentials } = await import('../utils/credentials.js');
+      vi.mocked(getCredentials).mockResolvedValue(testToken);
+
+      const cachedLimits = {
+        five_hour: { utilization: 0.5, resets_at: '2024-01-01T00:00:00Z' },
+        seven_day: null,
+        seven_day_sonnet: null,
+      };
+      await mkdir(ACTUAL_CACHE_DIR, { recursive: true, mode: 0o700 });
+      await writeFile(
+        path.join(ACTUAL_CACHE_DIR, `cache-${tokenHash}.json`),
+        JSON.stringify({ data: cachedLimits, timestamp: Date.now() - 600_000 }),
+        { mode: 0o600 }
+      );
+
+      const fetchMock = vi.fn();
+      global.fetch = fetchMock;
+
+      const { fetchUsageLimits, clearCache } = await import('../utils/api-client.js');
+      clearCache();
+
+      // First call establishes lastTokenHash while credentials are available.
+      await fetchUsageLimits(300, { cacheOnly: true });
+
+      // Credentials become unavailable (e.g. keychain hiccup) — should still
+      // resolve via the last known token hash, and never touch the network.
+      vi.mocked(getCredentials).mockResolvedValue(null);
+      const result = await fetchUsageLimits(300, { cacheOnly: true });
+
+      expect(result).not.toBeNull();
+      expect(result?.five_hour?.utilization).toBe(0.5);
+      expect(fetchMock).not.toHaveBeenCalled();
+
+      await deleteFileCacheForToken(testToken);
+    });
+
+    it('should perform the full network fetch flow when opts is omitted — check-usage.ts is unaffected', async () => {
+      const testToken = 'cacheonly-omitted-token';
       const { getCredentials } = await import('../utils/credentials.js');
       vi.mocked(getCredentials).mockResolvedValue(testToken);
       await deleteFileCacheForToken(testToken);
@@ -511,102 +602,6 @@ describe('api-client', () => {
       expect(fetchMock).toHaveBeenCalledTimes(1);
 
       await deleteFileCacheForToken(testToken);
-    });
-
-    it('should return the fresh value when inner resolves before the deadline', async () => {
-      const testToken = 'deadline-fresh-token';
-      const { getCredentials } = await import('../utils/credentials.js');
-      vi.mocked(getCredentials).mockResolvedValue(testToken);
-      await deleteFileCacheForToken(testToken);
-
-      const mockLimits = {
-        five_hour: { utilization: 0.15, resets_at: '2024-01-01T00:00:00Z' },
-        seven_day: null,
-        seven_day_sonnet: null,
-      };
-      const fetchMock = vi.fn().mockResolvedValue({
-        ok: true,
-        json: () => Promise.resolve(mockLimits),
-      });
-      global.fetch = fetchMock;
-
-      const { fetchUsageLimits, clearCache } = await import('../utils/api-client.js');
-      clearCache();
-
-      // Deadline is generous (5s) — the fast mock resolves well within it.
-      const result = await fetchUsageLimits(300, { deadlineMs: 5000 });
-
-      expect(result).not.toBeNull();
-      expect(result?.five_hour?.utilization).toBe(0.15);
-      expect(fetchMock).toHaveBeenCalledTimes(1);
-
-      await deleteFileCacheForToken(testToken);
-    });
-
-    it('should serve stale file cache once the deadline elapses while inner is still pending', async () => {
-      const testToken = 'deadline-stale-token';
-      const tokenHash = hashToken(testToken);
-
-      const { getCredentials } = await import('../utils/credentials.js');
-      vi.mocked(getCredentials).mockResolvedValue(testToken);
-
-      // Stale file cache: too old for the 300s TTL, still within STALE_FALLBACK_SECONDS (3600s).
-      const staleLimits = {
-        five_hour: { utilization: 0.55, resets_at: '2024-01-01T00:00:00Z' },
-        seven_day: null,
-        seven_day_sonnet: null,
-      };
-      await mkdir(ACTUAL_CACHE_DIR, { recursive: true, mode: 0o700 });
-      await writeFile(
-        path.join(ACTUAL_CACHE_DIR, `cache-${tokenHash}.json`),
-        JSON.stringify({ data: staleLimits, timestamp: Date.now() - 600_000 }),
-        { mode: 0o600 }
-      );
-
-      // fetch() never settles within the test — simulates a hung/slow network call
-      // (the ~11s worst case this feature is meant to protect against).
-      global.fetch = vi.fn(() => new Promise(() => {}));
-
-      const { fetchUsageLimits, clearCache } = await import('../utils/api-client.js');
-      clearCache();
-
-      vi.useFakeTimers();
-      try {
-        const resultPromise = fetchUsageLimits(300, { deadlineMs: 100 });
-        // Fire the deadline timer without waiting real wall-clock time.
-        await vi.advanceTimersByTimeAsync(100);
-        const result = await resultPromise;
-
-        expect(result).not.toBeNull();
-        expect(result?.five_hour?.utilization).toBe(0.55);
-      } finally {
-        vi.useRealTimers();
-      }
-
-      await deleteFileCacheForToken(testToken);
-    });
-
-    it('should return null (not hang) when inner never resolves and no stale cache exists', async () => {
-      const testToken = 'deadline-null-token';
-      const { getCredentials } = await import('../utils/credentials.js');
-      vi.mocked(getCredentials).mockResolvedValue(testToken);
-      await deleteFileCacheForToken(testToken);
-
-      global.fetch = vi.fn(() => new Promise(() => {}));
-
-      const { fetchUsageLimits, clearCache } = await import('../utils/api-client.js');
-      clearCache();
-
-      vi.useFakeTimers();
-      try {
-        const resultPromise = fetchUsageLimits(300, { deadlineMs: 100 });
-        await vi.advanceTimersByTimeAsync(100);
-        const result = await resultPromise;
-
-        expect(result).toBeNull();
-      } finally {
-        vi.useRealTimers();
-      }
     });
   });
 });

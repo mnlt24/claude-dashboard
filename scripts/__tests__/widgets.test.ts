@@ -1014,6 +1014,7 @@ describe('widgets', () => {
     it('should return error state when API call fails', async () => {
       vi.spyOn(codexClient, 'isCodexInstalled').mockResolvedValue(true);
       vi.spyOn(codexClient, 'fetchCodexUsage').mockResolvedValue(null);
+      vi.spyOn(codexClient, 'getCodexModel').mockResolvedValue(null);
 
       const ctx = createContext();
       const data = await codexUsageWidget.getData(ctx);
@@ -1033,6 +1034,7 @@ describe('widgets', () => {
         primary: { usedPercent: 15, resetAt: 1769604227 },
         secondary: { usedPercent: 5, resetAt: 1770191027 },
       });
+      vi.spyOn(codexClient, 'getCodexModel').mockResolvedValue(null);
 
       const ctx = createContext();
       const data = await codexUsageWidget.getData(ctx);
@@ -1052,12 +1054,46 @@ describe('widgets', () => {
         primary: null,
         secondary: { usedPercent: 10, resetAt: 1770191027 },
       });
+      vi.spyOn(codexClient, 'getCodexModel').mockResolvedValue(null);
 
       const ctx = createContext();
       const data = await codexUsageWidget.getData(ctx);
 
       expect(data?.primaryPercent).toBeNull();
       expect(data?.secondaryPercent).toBe(10);
+    });
+
+    it('should call getCodexModel with cacheOnly matching ctx.fast (hot-path never blocks on codex exec)', async () => {
+      vi.spyOn(codexClient, 'isCodexInstalled').mockResolvedValue(true);
+      vi.spyOn(codexClient, 'fetchCodexUsage').mockResolvedValue({
+        model: 'fallback-model',
+        planType: 'plus',
+        primary: { usedPercent: 1, resetAt: 1769604227 },
+        secondary: null,
+      });
+      const getCodexModelSpy = vi.spyOn(codexClient, 'getCodexModel').mockResolvedValue(null);
+
+      const ctx = createContext();
+      ctx.fast = true;
+      await codexUsageWidget.getData(ctx);
+
+      expect(getCodexModelSpy).toHaveBeenCalledWith({ cacheOnly: true });
+    });
+
+    it('should prefer the direct getCodexModel result over the fetchCodexUsage-embedded model', async () => {
+      vi.spyOn(codexClient, 'isCodexInstalled').mockResolvedValue(true);
+      vi.spyOn(codexClient, 'fetchCodexUsage').mockResolvedValue({
+        model: 'stale-cached-model',
+        planType: 'plus',
+        primary: { usedPercent: 1, resetAt: 1769604227 },
+        secondary: null,
+      });
+      vi.spyOn(codexClient, 'getCodexModel').mockResolvedValue('fresh-config-model');
+
+      const ctx = createContext();
+      const data = await codexUsageWidget.getData(ctx);
+
+      expect(data?.model).toBe('fresh-config-model');
     });
 
     it('should render model name and percentages', () => {
@@ -1256,6 +1292,17 @@ describe('widgets', () => {
       expect(result).toContain(ICON.gem);
       expect(result).toContain('gemini');
       expect(result).toContain(ICON.warning);
+    });
+
+    it('should call fetchGeminiUsage with cacheOnly matching ctx.fast (hot-path never blocks on the Gemini quota API)', async () => {
+      vi.spyOn(geminiClient, 'isGeminiInstalled').mockResolvedValue(true);
+      const fetchGeminiUsageSpy = vi.spyOn(geminiClient, 'fetchGeminiUsage').mockResolvedValue(null);
+
+      const ctx = createContext();
+      ctx.fast = true;
+      await geminiUsageWidget.getData(ctx);
+
+      expect(fetchGeminiUsageSpy).toHaveBeenCalledWith(ctx.config.cache.ttlSeconds, { cacheOnly: true });
     });
   });
 
@@ -2282,6 +2329,17 @@ describe('widgets', () => {
       expect(result).toContain(ICON.orangeCircle);
       expect(result).toContain('45%');
       expect(result).toContain('20%');
+    });
+
+    it('should call fetchZaiUsage with cacheOnly matching ctx.fast (hot-path never blocks on the z.ai quota API)', async () => {
+      vi.spyOn(zaiClient, 'isZaiInstalled').mockReturnValue(true);
+      const fetchZaiUsageSpy = vi.spyOn(zaiClient, 'fetchZaiUsage').mockResolvedValue(null);
+
+      const ctx = createContext();
+      ctx.fast = true;
+      await zaiUsageWidget.getData(ctx);
+
+      expect(fetchZaiUsageSpy).toHaveBeenCalledWith(ctx.config.cache.ttlSeconds, { cacheOnly: true });
     });
   });
 

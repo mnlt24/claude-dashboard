@@ -495,9 +495,59 @@ async function getProjectId(credentials: GeminiCredentials): Promise<string | nu
 }
 
 /**
- * Fetch Gemini usage limits
+ * Cache-only implementation: never touches the network. Unlike the full flow,
+ * this skips `getValidCredentials()`'s token refresh (Google OAuth endpoint),
+ * `getProjectId()`'s `loadCodeAssist` fallback, and `fetchFromGeminiApi()`'s
+ * `retrieveUserQuota` call — all network requests gated behind
+ * `AbortSignal.timeout(API_TIMEOUT_MS)` (5s each).
+ *
+ * Reads credentials locally (keychain/file, no refresh) purely to compute the
+ * cache key, then reads memory/file cache (fresh, then stale within
+ * `STALE_CACHE_TTL_SECONDS`) only. The cache file itself is keyed on
+ * `hashToken(accessToken)`, not on project ID, so a project ID lookup isn't
+ * needed for a cache-only read.
+ *
+ * Used by hot-path render callers; a detached background refresh process
+ * (see `background-refresh.ts`) is responsible for warming the cache instead.
  */
-export async function fetchGeminiUsage(ttlSeconds: number = 60): Promise<GeminiUsageLimits | null> {
+async function fetchGeminiUsageCacheOnly(): Promise<GeminiUsageLimits | null> {
+  const credentials = await getGeminiCredentials();
+  if (!credentials) {
+    debugLog('gemini', 'fetchGeminiUsageCacheOnly: no local credentials');
+    return null;
+  }
+
+  const tokenHash = hashToken(credentials.accessToken);
+  const cacheFile = fileCachePath(`gemini-usage-${tokenHash}.json`);
+
+  // Check memory cache (skip negative-cache entries — still worth a file check)
+  const cached = geminiCacheMap.get(tokenHash);
+  if (cached && !cached.isError) {
+    debugLog('gemini', 'fetchGeminiUsageCacheOnly: memory cache hit');
+    return cached.data;
+  }
+
+  // Fresh-or-stale file cache, never network.
+  const fromFile = await loadFileCache<GeminiUsageLimits>(cacheFile, STALE_CACHE_TTL_SECONDS);
+  return fromFile?.data ?? null;
+}
+
+/**
+ * Fetch Gemini usage limits
+ *
+ * @param opts.cacheOnly - When true, never touch the network (token refresh,
+ *   project ID lookup, or the usage-quota fetch itself). See
+ *   `fetchGeminiUsageCacheOnly()`. Used by hot-path render callers; a detached
+ *   background refresh process is responsible for warming the cache instead.
+ */
+export async function fetchGeminiUsage(
+  ttlSeconds: number = 60,
+  opts?: { cacheOnly?: boolean }
+): Promise<GeminiUsageLimits | null> {
+  if (opts?.cacheOnly) {
+    return fetchGeminiUsageCacheOnly();
+  }
+
   const credentials = await getValidCredentials();
   if (!credentials) {
     debugLog('gemini', 'fetchGeminiUsage: no valid credentials');

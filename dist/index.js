@@ -734,32 +734,22 @@ async function fetchUsageLimitsInner(ttlSeconds = 300) {
     pendingRequests.delete(tokenHash);
   }
 }
-async function staleAfterDeadline() {
-  if (!lastTokenHash)
-    return null;
-  return loadFileCache2(lastTokenHash, STALE_FALLBACK_SECONDS);
+async function fetchUsageLimitsCacheOnly() {
+  const token = await getCredentials();
+  if (!token) {
+    if (!lastTokenHash)
+      return null;
+    return loadFileCache2(lastTokenHash, STALE_FALLBACK_SECONDS);
+  }
+  const tokenHash = hashToken(token);
+  lastTokenHash = tokenHash;
+  return loadFileCache2(tokenHash, STALE_FALLBACK_SECONDS);
 }
 async function fetchUsageLimits(ttlSeconds = 300, opts) {
-  const inner = fetchUsageLimitsInner(ttlSeconds);
-  const deadlineMs = opts?.deadlineMs;
-  if (!deadlineMs)
-    return inner;
-  inner.catch(() => {
-  });
-  let timer;
-  const deadline = new Promise((resolve) => {
-    timer = setTimeout(() => {
-      debugLog("api", `usage fetch exceeded ${deadlineMs}ms deadline; serving stale`);
-      resolve(staleAfterDeadline());
-    }, deadlineMs);
-    timer.unref?.();
-  });
-  try {
-    return await Promise.race([inner, deadline]);
-  } finally {
-    if (timer)
-      clearTimeout(timer);
+  if (opts?.cacheOnly) {
+    return fetchUsageLimitsCacheOnly();
   }
+  return fetchUsageLimitsInner(ttlSeconds);
 }
 async function makeRequest(token) {
   const controller = new AbortController();
@@ -890,6 +880,272 @@ async function saveFileCache2(tokenHash, data) {
   await saveFileCache(getCacheFilePath(tokenHash), data);
 }
 
+// scripts/utils/codex-client.ts
+import { readFile as readFile3, stat as stat3, writeFile as writeFile2, mkdir as mkdir2 } from "fs/promises";
+import { execFile as execFile3 } from "child_process";
+import os2 from "os";
+import path2 from "path";
+var API_TIMEOUT_MS2 = 5e3;
+var CODEX_AUTH_PATH = path2.join(os2.homedir(), ".codex", "auth.json");
+var CODEX_CONFIG_PATH = path2.join(os2.homedir(), ".codex", "config.toml");
+var MODEL_CACHE_PATH = path2.join(FILE_CACHE_DIR, "codex-model-cache.json");
+var codexCacheMap = /* @__PURE__ */ new Map();
+var pendingRequests2 = /* @__PURE__ */ new Map();
+var cachedAuth = null;
+function isValidCodexApiResponse(data) {
+  return data !== null && typeof data === "object" && "rate_limit" in data && "plan_type" in data && typeof data.rate_limit === "object" && data.rate_limit !== null;
+}
+async function isCodexInstalled() {
+  try {
+    await stat3(CODEX_AUTH_PATH);
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function getCodexAuth() {
+  try {
+    const fileStat = await stat3(CODEX_AUTH_PATH);
+    if (cachedAuth && cachedAuth.mtime === fileStat.mtimeMs) {
+      return cachedAuth.data;
+    }
+    const raw = await readFile3(CODEX_AUTH_PATH, "utf-8");
+    const json = JSON.parse(raw);
+    const accessToken = json?.tokens?.access_token;
+    const accountId = json?.tokens?.account_id;
+    if (!accessToken || !accountId) {
+      return null;
+    }
+    const data = { accessToken, accountId };
+    cachedAuth = { data, mtime: fileStat.mtimeMs };
+    return data;
+  } catch {
+    return null;
+  }
+}
+async function getModelFromConfig() {
+  try {
+    const raw = await readFile3(CODEX_CONFIG_PATH, "utf-8");
+    const match = raw.match(/^model\s*=\s*["']([^"']+)["']\s*(?:#.*)?$/m);
+    return match ? match[1] : null;
+  } catch {
+    return null;
+  }
+}
+async function getConfigMtime() {
+  try {
+    const fileStat = await stat3(CODEX_CONFIG_PATH);
+    return fileStat.mtimeMs;
+  } catch {
+    return 0;
+  }
+}
+async function getCachedModel(currentMtime) {
+  try {
+    const raw = await readFile3(MODEL_CACHE_PATH, "utf-8");
+    const cache = JSON.parse(raw);
+    if (cache.configMtime === currentMtime && cache.model) {
+      debugLog("codex", "getCachedModel: cache hit", cache.model);
+      return cache.model;
+    }
+    debugLog("codex", "getCachedModel: cache stale");
+    return null;
+  } catch {
+    return null;
+  }
+}
+async function saveModelCache(model, configMtime) {
+  try {
+    await mkdir2(FILE_CACHE_DIR, { recursive: true });
+    const cache = { model, configMtime };
+    await writeFile2(MODEL_CACHE_PATH, JSON.stringify(cache), "utf-8");
+    debugLog("codex", "saveModelCache: saved", model);
+  } catch (err) {
+    debugLog("codex", "saveModelCache: error", err);
+  }
+}
+var modelDetectionFailedAt = null;
+var MODEL_DETECTION_BACKOFF_MS = 3e5;
+var pendingModelDetection = null;
+function detectModelFromCodexExecDeduped() {
+  if (pendingModelDetection) {
+    debugLog("codex", "detectModelFromCodexExecDeduped: reusing in-flight detection");
+    return pendingModelDetection;
+  }
+  pendingModelDetection = detectModelFromCodexExec().finally(() => {
+    pendingModelDetection = null;
+  });
+  return pendingModelDetection;
+}
+async function detectModelFromCodexExec() {
+  if (modelDetectionFailedAt !== null && Date.now() - modelDetectionFailedAt < MODEL_DETECTION_BACKOFF_MS) {
+    debugLog("codex", "detectModelFromCodexExec: skipping (backoff)");
+    return null;
+  }
+  try {
+    debugLog("codex", "detectModelFromCodexExec: running codex exec...");
+    const output = await new Promise((resolve, reject) => {
+      execFile3("codex", ["exec", "1+1="], {
+        encoding: "utf-8",
+        timeout: 1e4
+      }, (error, stdout) => {
+        if (error)
+          reject(error);
+        else
+          resolve(stdout);
+      });
+    });
+    const match = output.match(/^model:\s*(.+)$/m);
+    if (match) {
+      const model = match[1].trim();
+      debugLog("codex", "detectModelFromCodexExec: detected", model);
+      modelDetectionFailedAt = null;
+      return model;
+    }
+    debugLog("codex", "detectModelFromCodexExec: no model line found");
+    modelDetectionFailedAt = Date.now();
+    return null;
+  } catch (err) {
+    debugLog("codex", "detectModelFromCodexExec: error", err);
+    modelDetectionFailedAt = Date.now();
+    return null;
+  }
+}
+async function getCodexModel(opts) {
+  const configModel = await getModelFromConfig();
+  if (configModel) {
+    debugLog("codex", "getCodexModel: from config", configModel);
+    return configModel;
+  }
+  const configMtime = await getConfigMtime();
+  const cachedModel = await getCachedModel(configMtime);
+  if (cachedModel) {
+    return cachedModel;
+  }
+  if (opts?.cacheOnly) {
+    debugLog("codex", "getCodexModel: cacheOnly, skipping codex exec detection");
+    return null;
+  }
+  const detectedModel = await detectModelFromCodexExecDeduped();
+  if (detectedModel) {
+    await saveModelCache(detectedModel, configMtime);
+    return detectedModel;
+  }
+  return null;
+}
+async function fetchCodexUsage(ttlSeconds = 60, opts) {
+  const auth = await getCodexAuth();
+  if (!auth) {
+    return null;
+  }
+  const tokenHash = hashToken(auth.accessToken);
+  const cacheFile = fileCachePath(`codex-usage-${tokenHash}.json`);
+  const cached = codexCacheMap.get(tokenHash);
+  if (cached) {
+    const ageSeconds = (Date.now() - cached.timestamp) / 1e3;
+    const effectiveTtl = cached.isError ? NEGATIVE_CACHE_SECONDS : ttlSeconds;
+    if (ageSeconds < effectiveTtl) {
+      if (cached.isError) {
+        debugLog("codex", "Negative cache hit, skipping API call");
+        return null;
+      }
+      return cached.data;
+    }
+  }
+  const fromFile = await loadFileCache(cacheFile, ttlSeconds);
+  if (fromFile) {
+    debugLog("codex", "file cache hit");
+    codexCacheMap.set(tokenHash, { data: fromFile.data, timestamp: fromFile.timestamp });
+    return fromFile.data;
+  }
+  if (opts?.cacheOnly) {
+    debugLog("codex", "cacheOnly: no fresh cache, checking stale fallback");
+    const staleFile = await loadFileCache(cacheFile, STALE_CACHE_TTL_SECONDS);
+    return staleFile?.data ?? null;
+  }
+  const pending = pendingRequests2.get(tokenHash);
+  if (pending) {
+    return pending;
+  }
+  const requestPromise = fetchFromCodexApi(auth, tokenHash);
+  pendingRequests2.set(tokenHash, requestPromise);
+  try {
+    const result = await requestPromise;
+    if (result) {
+      await saveFileCache(cacheFile, result);
+      return result;
+    }
+    debugLog("codex", `Setting negative cache for ${NEGATIVE_CACHE_SECONDS}s`);
+    codexCacheMap.set(tokenHash, {
+      data: null,
+      timestamp: Date.now(),
+      isError: true
+    });
+    if (cached && !cached.isError) {
+      debugLog("codex", "Returning stale cache data");
+      return cached.data;
+    }
+    const staleFile = await loadFileCache(cacheFile, STALE_CACHE_TTL_SECONDS);
+    if (staleFile) {
+      debugLog("codex", "stale file cache fallback");
+      return staleFile.data;
+    }
+    return null;
+  } finally {
+    pendingRequests2.delete(tokenHash);
+  }
+}
+async function fetchFromCodexApi(auth, tokenHash) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), API_TIMEOUT_MS2);
+  try {
+    debugLog("codex", "fetchFromCodexApi: starting...");
+    const response = await fetch("https://chatgpt.com/backend-api/wham/usage", {
+      method: "GET",
+      headers: {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": `claude-dashboard/${VERSION}`,
+        "Authorization": `Bearer ${auth.accessToken}`,
+        "ChatGPT-Account-Id": auth.accountId
+      },
+      signal: controller.signal
+    });
+    debugLog("codex", "fetchFromCodexApi: response status", response.status);
+    if (!response.ok) {
+      debugLog("codex", "fetchFromCodexApi: response not ok");
+      return null;
+    }
+    const data = await response.json();
+    if (!isValidCodexApiResponse(data)) {
+      debugLog("codex", "fetchFromCodexApi: invalid response structure");
+      return null;
+    }
+    debugLog("codex", "fetchFromCodexApi: got data", data.plan_type);
+    const model = await getCodexModel();
+    const limits = {
+      model: model ?? "unknown",
+      planType: data.plan_type,
+      primary: data.rate_limit.primary_window ? {
+        usedPercent: data.rate_limit.primary_window.used_percent,
+        resetAt: data.rate_limit.primary_window.reset_at
+      } : null,
+      secondary: data.rate_limit.secondary_window ? {
+        usedPercent: data.rate_limit.secondary_window.used_percent,
+        resetAt: data.rate_limit.secondary_window.reset_at
+      } : null
+    };
+    codexCacheMap.set(tokenHash, { data: limits, timestamp: Date.now() });
+    debugLog("codex", "fetchFromCodexApi: success", limits);
+    return limits;
+  } catch (err) {
+    debugLog("codex", "fetchFromCodexApi: error", err);
+    return null;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 // scripts/utils/provider.ts
 function isTruthyFlag(v) {
   return v === "1" || v?.toLowerCase() === "true";
@@ -926,6 +1182,694 @@ function getZaiApiBaseUrl() {
     const url = new URL(baseUrl);
     return url.origin;
   } catch {
+    return null;
+  }
+}
+
+// scripts/utils/formatters.ts
+function formatTokens(tokens) {
+  if (tokens >= 1e6) {
+    const value = tokens / 1e6;
+    return value >= 10 ? `${Math.round(value)}M` : `${value.toFixed(1)}M`;
+  }
+  if (tokens >= 1e3) {
+    const value = tokens / 1e3;
+    return value >= 10 ? `${Math.round(value)}K` : `${value.toFixed(1)}K`;
+  }
+  return String(tokens);
+}
+function formatCost(cost) {
+  return `$${cost.toFixed(2)}`;
+}
+function formatTimeRemaining(resetAt, t) {
+  const reset = typeof resetAt === "string" ? new Date(resetAt) : resetAt;
+  const now = /* @__PURE__ */ new Date();
+  const diffMs = reset.getTime() - now.getTime();
+  if (diffMs <= 0)
+    return `0${t.time.minutes}`;
+  const totalMinutes = Math.floor(diffMs / (1e3 * 60));
+  const totalHours = Math.floor(totalMinutes / 60);
+  const days = Math.floor(totalHours / 24);
+  const hours = totalHours % 24;
+  const minutes = totalMinutes % 60;
+  if (days > 0) {
+    return `${days}${t.time.days}${hours}${t.time.hours}`;
+  }
+  if (hours > 0) {
+    return `${hours}${t.time.hours}${minutes}${t.time.minutes}`;
+  }
+  return `${minutes}${t.time.minutes}`;
+}
+function shortenModelName(displayName) {
+  const lower = displayName.toLowerCase();
+  if (lower.includes("opus"))
+    return "Opus";
+  if (lower.includes("sonnet"))
+    return "Sonnet";
+  if (lower.includes("haiku"))
+    return "Haiku";
+  const parts = displayName.split(/\s+/);
+  if (parts.length > 1 && parts[0].toLowerCase() === "claude") {
+    return parts[1];
+  }
+  return displayName;
+}
+function calculatePercent(current, total) {
+  if (total <= 0)
+    return 0;
+  return Math.min(100, Math.round(current / total * 100));
+}
+function formatDuration(ms, t) {
+  if (ms <= 0)
+    return `0${t.minutes}`;
+  const totalMinutes = Math.floor(ms / (1e3 * 60));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  if (hours > 0 && minutes > 0) {
+    return `${hours}${t.hours}${minutes}${t.minutes}`;
+  }
+  if (hours > 0) {
+    return `${hours}${t.hours}`;
+  }
+  return `${minutes}${t.minutes}`;
+}
+function truncate(str, maxLen) {
+  return str.length <= maxLen ? str : str.slice(0, maxLen) + "\u2026";
+}
+function clampPercent(value) {
+  return Math.min(100, Math.max(0, Math.round(value)));
+}
+function osc8Link(url, text) {
+  return `\x1B]8;;${url}\x1B\\${text}\x1B]8;;\x1B\\`;
+}
+
+// scripts/utils/zai-api-client.ts
+var API_TIMEOUT_MS3 = 5e3;
+function calculateUsagePercent(currentValue, remaining) {
+  const total = currentValue + remaining;
+  if (total <= 0) {
+    return null;
+  }
+  return clampPercent(currentValue / total * 100);
+}
+function parseUsagePercent(limit) {
+  if (limit.percentage !== void 0) {
+    return clampPercent(limit.percentage);
+  }
+  if (limit.currentValue !== void 0 && limit.remaining !== void 0) {
+    return calculateUsagePercent(limit.currentValue, limit.remaining);
+  }
+  if (limit.currentValue !== void 0 && limit.usage !== void 0 && limit.usage > 0) {
+    return clampPercent(limit.currentValue / limit.usage * 100);
+  }
+  return null;
+}
+var zaiCacheMap = /* @__PURE__ */ new Map();
+var pendingRequests3 = /* @__PURE__ */ new Map();
+function isZaiInstalled() {
+  return isZaiProvider() && !!getZaiApiBaseUrl() && !!getZaiAuthToken();
+}
+function getZaiAuthToken() {
+  return process.env.ANTHROPIC_AUTH_TOKEN || null;
+}
+async function fetchZaiUsage(ttlSeconds = 60, opts) {
+  if (!isZaiProvider()) {
+    debugLog("zai", "fetchZaiUsage: not a z.ai provider");
+    return null;
+  }
+  const baseUrl = getZaiApiBaseUrl();
+  const authToken = getZaiAuthToken();
+  if (!baseUrl || !authToken) {
+    debugLog("zai", "fetchZaiUsage: missing base URL or auth token");
+    return null;
+  }
+  const tokenHash = hashToken(authToken);
+  const cacheKey = `${baseUrl}:${tokenHash}`;
+  const cacheFile = fileCachePath(`zai-usage-${hashToken(cacheKey)}.json`);
+  const cached = zaiCacheMap.get(cacheKey);
+  if (cached) {
+    const ageSeconds = (Date.now() - cached.timestamp) / 1e3;
+    const effectiveTtl = cached.isError ? NEGATIVE_CACHE_SECONDS : ttlSeconds;
+    if (ageSeconds < effectiveTtl) {
+      if (cached.isError) {
+        debugLog("zai", "Negative cache hit, skipping API call");
+        return null;
+      }
+      debugLog("zai", "fetchZaiUsage: returning cached data");
+      return cached.data;
+    }
+  }
+  const fromFile = await loadFileCache(cacheFile, ttlSeconds);
+  if (fromFile) {
+    debugLog("zai", "file cache hit");
+    zaiCacheMap.set(cacheKey, { data: fromFile.data, timestamp: fromFile.timestamp });
+    return fromFile.data;
+  }
+  if (opts?.cacheOnly) {
+    debugLog("zai", "cacheOnly: no fresh cache, checking stale fallback");
+    const staleFile = await loadFileCache(cacheFile, STALE_CACHE_TTL_SECONDS);
+    return staleFile?.data ?? null;
+  }
+  const pending = pendingRequests3.get(cacheKey);
+  if (pending) {
+    return pending;
+  }
+  const requestPromise = fetchFromZaiApi(baseUrl, authToken);
+  pendingRequests3.set(cacheKey, requestPromise);
+  try {
+    const result = await requestPromise;
+    if (result) {
+      zaiCacheMap.set(cacheKey, { data: result, timestamp: Date.now() });
+      await saveFileCache(cacheFile, result);
+      return result;
+    }
+    debugLog("zai", `Setting negative cache for ${NEGATIVE_CACHE_SECONDS}s`);
+    zaiCacheMap.set(cacheKey, {
+      data: null,
+      timestamp: Date.now(),
+      isError: true
+    });
+    if (cached && !cached.isError) {
+      debugLog("zai", "Returning stale cache data");
+      return cached.data;
+    }
+    const staleFile = await loadFileCache(cacheFile, STALE_CACHE_TTL_SECONDS);
+    if (staleFile) {
+      debugLog("zai", "stale file cache fallback");
+      return staleFile.data;
+    }
+    return null;
+  } finally {
+    pendingRequests3.delete(cacheKey);
+  }
+}
+async function fetchFromZaiApi(baseUrl, authToken) {
+  try {
+    debugLog("zai", "fetchFromZaiApi: starting...");
+    const url = `${baseUrl}/api/monitor/usage/quota/limit`;
+    const response = await fetch(url, {
+      method: "GET",
+      headers: {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${authToken}`
+      },
+      signal: AbortSignal.timeout(API_TIMEOUT_MS3)
+    });
+    debugLog("zai", "fetchFromZaiApi: response status", response.status);
+    if (!response.ok) {
+      debugLog("zai", "fetchFromZaiApi: response not ok");
+      return null;
+    }
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      debugLog("zai", "fetchFromZaiApi: invalid JSON response");
+      return null;
+    }
+    if (!data || typeof data !== "object") {
+      debugLog("zai", "fetchFromZaiApi: invalid response - not an object");
+      return null;
+    }
+    const typedData = data;
+    const limits = typedData.data?.limits;
+    if (!limits || !Array.isArray(limits)) {
+      debugLog("zai", "fetchFromZaiApi: no limits array");
+      return null;
+    }
+    debugLog("zai", `fetchFromZaiApi: got ${limits.length} limits`);
+    let tokensPercent = null;
+    let tokensResetAt = null;
+    let mcpPercent = null;
+    let mcpResetAt = null;
+    for (const limit of limits) {
+      const resetTime = limit.nextResetTime;
+      if (limit.type === "TOKENS_LIMIT") {
+        tokensPercent = parseUsagePercent(limit);
+        if (resetTime !== void 0) {
+          tokensResetAt = resetTime;
+        }
+      } else if (limit.type === "TIME_LIMIT") {
+        mcpPercent = parseUsagePercent(limit);
+        if (resetTime !== void 0) {
+          mcpResetAt = resetTime;
+        }
+      }
+    }
+    const result = {
+      model: "GLM",
+      tokensPercent,
+      tokensResetAt,
+      mcpPercent,
+      mcpResetAt
+    };
+    debugLog("zai", "fetchFromZaiApi: success", result);
+    return result;
+  } catch (err) {
+    debugLog("zai", "fetchFromZaiApi: error", err);
+    return null;
+  }
+}
+
+// scripts/utils/gemini-client.ts
+import { readFile as readFile4, writeFile as writeFile3, stat as stat4 } from "fs/promises";
+import { execFile as execFile4 } from "child_process";
+import os3 from "os";
+import path3 from "path";
+var API_TIMEOUT_MS4 = 5e3;
+var GEMINI_DIR = ".gemini";
+var OAUTH_CREDS_FILE = "oauth_creds.json";
+var SETTINGS_FILE = "settings.json";
+var KEYCHAIN_SERVICE_NAME = "gemini-cli-oauth";
+var MAIN_ACCOUNT_KEY = "main-account";
+var CODE_ASSIST_ENDPOINT = "https://cloudcode-pa.googleapis.com";
+var CODE_ASSIST_API_VERSION = "v1internal";
+var GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
+var OAUTH_CLIENT_ID = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com";
+var OAUTH_CLIENT_SECRET = "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";
+var TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1e3;
+var geminiCacheMap = /* @__PURE__ */ new Map();
+var pendingRequests4 = /* @__PURE__ */ new Map();
+var pendingRefreshRequests = /* @__PURE__ */ new Map();
+var cachedCredentials = null;
+var keychainCache = null;
+var KEYCHAIN_CACHE_TTL_MS2 = 1e4;
+var cachedSettings = null;
+function getGeminiDir() {
+  return path3.join(os3.homedir(), GEMINI_DIR);
+}
+async function isGeminiInstalled() {
+  try {
+    const keychainToken = await getTokenFromKeychain();
+    if (keychainToken) {
+      return true;
+    }
+    const oauthPath = path3.join(getGeminiDir(), OAUTH_CREDS_FILE);
+    await stat4(oauthPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+async function getTokenFromKeychain() {
+  if (os3.platform() !== "darwin") {
+    return null;
+  }
+  if (keychainCache && Date.now() - keychainCache.timestamp < KEYCHAIN_CACHE_TTL_MS2) {
+    return keychainCache.data;
+  }
+  try {
+    const result = await new Promise((resolve, reject) => {
+      execFile4(
+        "security",
+        ["find-generic-password", "-s", KEYCHAIN_SERVICE_NAME, "-a", MAIN_ACCOUNT_KEY, "-w"],
+        { encoding: "utf-8", timeout: 3e3 },
+        (error, stdout) => {
+          if (error)
+            reject(error);
+          else
+            resolve(stdout.trim());
+        }
+      );
+    });
+    if (!result) {
+      keychainCache = { data: null, timestamp: Date.now() };
+      return null;
+    }
+    const stored = JSON.parse(result);
+    if (!stored.token?.accessToken) {
+      keychainCache = { data: null, timestamp: Date.now() };
+      return null;
+    }
+    const data = {
+      accessToken: stored.token.accessToken,
+      refreshToken: stored.token.refreshToken,
+      expiryDate: stored.token.expiresAt
+    };
+    keychainCache = { data, timestamp: Date.now() };
+    return data;
+  } catch {
+    keychainCache = { data: null, timestamp: Date.now() };
+    return null;
+  }
+}
+async function getCredentialsFromFile2() {
+  try {
+    const oauthPath = path3.join(getGeminiDir(), OAUTH_CREDS_FILE);
+    const fileStat = await stat4(oauthPath);
+    if (cachedCredentials && cachedCredentials.mtime === fileStat.mtimeMs) {
+      return cachedCredentials.data;
+    }
+    const raw = await readFile4(oauthPath, "utf-8");
+    const json = JSON.parse(raw);
+    const accessToken = json?.access_token;
+    if (!accessToken) {
+      return null;
+    }
+    const data = {
+      accessToken,
+      refreshToken: json?.refresh_token,
+      expiryDate: json?.expiry_date
+    };
+    cachedCredentials = { data, mtime: fileStat.mtimeMs };
+    return data;
+  } catch {
+    return null;
+  }
+}
+async function getGeminiCredentials() {
+  const keychainCreds = await getTokenFromKeychain();
+  if (keychainCreds) {
+    return keychainCreds;
+  }
+  return getCredentialsFromFile2();
+}
+function tokenNeedsRefresh(credentials) {
+  if (!credentials.expiryDate) {
+    return false;
+  }
+  return credentials.expiryDate < Date.now() + TOKEN_REFRESH_BUFFER_MS;
+}
+async function refreshTokenInternal(credentials) {
+  try {
+    debugLog("gemini", "refreshTokenInternal: attempting refresh...");
+    const response = await fetch(GOOGLE_TOKEN_ENDPOINT, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded"
+      },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: credentials.refreshToken,
+        client_id: OAUTH_CLIENT_ID,
+        client_secret: OAUTH_CLIENT_SECRET
+      }),
+      signal: AbortSignal.timeout(API_TIMEOUT_MS4)
+    });
+    if (!response.ok) {
+      debugLog("gemini", "refreshTokenInternal: failed", response.status);
+      return null;
+    }
+    const data = await response.json();
+    if (!data.access_token) {
+      debugLog("gemini", "refreshTokenInternal: no access_token in response");
+      return null;
+    }
+    const newCredentials = {
+      accessToken: data.access_token,
+      refreshToken: data.refresh_token || credentials.refreshToken,
+      expiryDate: Date.now() + data.expires_in * 1e3
+    };
+    await saveCredentialsToFile(newCredentials, data);
+    cachedCredentials = null;
+    debugLog("gemini", "refreshTokenInternal: success, new expiry", new Date(newCredentials.expiryDate).toISOString());
+    return newCredentials;
+  } catch (err) {
+    debugLog("gemini", "refreshTokenInternal: error", err);
+    return null;
+  }
+}
+async function refreshToken(credentials) {
+  if (!credentials.refreshToken) {
+    debugLog("gemini", "refreshToken: no refresh token available");
+    return null;
+  }
+  const tokenHash = hashToken(credentials.accessToken);
+  const pending = pendingRefreshRequests.get(tokenHash);
+  if (pending) {
+    debugLog("gemini", "refreshToken: using pending refresh request");
+    return pending;
+  }
+  const refreshPromise = refreshTokenInternal(credentials).finally(() => {
+    pendingRefreshRequests.delete(tokenHash);
+  });
+  pendingRefreshRequests.set(tokenHash, refreshPromise);
+  return refreshPromise;
+}
+async function saveCredentialsToFile(credentials, rawResponse) {
+  try {
+    const oauthPath = path3.join(getGeminiDir(), OAUTH_CREDS_FILE);
+    let existingData = {};
+    try {
+      const raw = await readFile4(oauthPath, "utf-8");
+      existingData = JSON.parse(raw);
+    } catch {
+    }
+    const newData = {
+      ...existingData,
+      access_token: credentials.accessToken,
+      refresh_token: credentials.refreshToken,
+      expiry_date: credentials.expiryDate,
+      token_type: rawResponse.token_type || "Bearer",
+      scope: rawResponse.scope || existingData.scope
+    };
+    await writeFile3(oauthPath, JSON.stringify(newData, null, 2), { mode: 384 });
+    debugLog("gemini", "saveCredentialsToFile: saved");
+  } catch (err) {
+    debugLog("gemini", "saveCredentialsToFile: error", err);
+  }
+}
+async function getValidCredentials() {
+  let credentials = await getGeminiCredentials();
+  if (!credentials) {
+    return null;
+  }
+  if (tokenNeedsRefresh(credentials)) {
+    debugLog("gemini", "getValidCredentials: token expired or expiring, attempting refresh");
+    const refreshedCreds = await refreshToken(credentials);
+    if (refreshedCreds) {
+      return refreshedCreds;
+    }
+    debugLog("gemini", "getValidCredentials: refresh failed");
+    return null;
+  }
+  return credentials;
+}
+var projectIdCacheMap = /* @__PURE__ */ new Map();
+var PROJECT_ID_CACHE_TTL_MS = 5 * 60 * 1e3;
+async function getGeminiSettings() {
+  try {
+    const settingsPath = path3.join(getGeminiDir(), SETTINGS_FILE);
+    const fileStat = await stat4(settingsPath);
+    if (cachedSettings && cachedSettings.mtime === fileStat.mtimeMs) {
+      return cachedSettings.data;
+    }
+    const raw = await readFile4(settingsPath, "utf-8");
+    const json = JSON.parse(raw);
+    const data = {
+      cloudaicompanionProject: json?.cloudaicompanionProject,
+      selectedModel: json?.selectedModel || json?.model?.name,
+      auth: json?.auth
+    };
+    cachedSettings = { data, mtime: fileStat.mtimeMs };
+    return data;
+  } catch {
+    return null;
+  }
+}
+async function getGeminiModel() {
+  const settings = await getGeminiSettings();
+  return settings?.selectedModel ?? null;
+}
+async function getProjectId(credentials) {
+  const envProjectId = process.env["GOOGLE_CLOUD_PROJECT"] || process.env["GOOGLE_CLOUD_PROJECT_ID"];
+  if (envProjectId) {
+    return envProjectId;
+  }
+  const settings = await getGeminiSettings();
+  if (settings?.cloudaicompanionProject) {
+    return settings.cloudaicompanionProject;
+  }
+  const tokenHash = hashToken(credentials.accessToken);
+  const cached = projectIdCacheMap.get(tokenHash);
+  if (cached && Date.now() - cached.timestamp < PROJECT_ID_CACHE_TTL_MS) {
+    return cached.data;
+  }
+  try {
+    const url = `${CODE_ASSIST_ENDPOINT}/${CODE_ASSIST_API_VERSION}:loadCodeAssist`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": `claude-dashboard/${VERSION}`,
+        "Authorization": `Bearer ${credentials.accessToken}`
+      },
+      body: JSON.stringify({
+        metadata: {
+          ideType: "GEMINI_CLI",
+          platform: "PLATFORM_UNSPECIFIED",
+          pluginType: "GEMINI"
+        }
+      }),
+      signal: AbortSignal.timeout(API_TIMEOUT_MS4)
+    });
+    if (!response.ok) {
+      debugLog("gemini", "loadCodeAssist: response not ok", response.status);
+      return null;
+    }
+    const data = await response.json();
+    const projectId = data?.cloudaicompanionProject;
+    if (projectId) {
+      projectIdCacheMap.set(tokenHash, { data: projectId, timestamp: Date.now() });
+      return projectId;
+    }
+  } catch (err) {
+    debugLog("gemini", "loadCodeAssist error:", err);
+  }
+  return null;
+}
+async function fetchGeminiUsageCacheOnly() {
+  const credentials = await getGeminiCredentials();
+  if (!credentials) {
+    debugLog("gemini", "fetchGeminiUsageCacheOnly: no local credentials");
+    return null;
+  }
+  const tokenHash = hashToken(credentials.accessToken);
+  const cacheFile = fileCachePath(`gemini-usage-${tokenHash}.json`);
+  const cached = geminiCacheMap.get(tokenHash);
+  if (cached && !cached.isError) {
+    debugLog("gemini", "fetchGeminiUsageCacheOnly: memory cache hit");
+    return cached.data;
+  }
+  const fromFile = await loadFileCache(cacheFile, STALE_CACHE_TTL_SECONDS);
+  return fromFile?.data ?? null;
+}
+async function fetchGeminiUsage(ttlSeconds = 60, opts) {
+  if (opts?.cacheOnly) {
+    return fetchGeminiUsageCacheOnly();
+  }
+  const credentials = await getValidCredentials();
+  if (!credentials) {
+    debugLog("gemini", "fetchGeminiUsage: no valid credentials");
+    return null;
+  }
+  const projectId = await getProjectId(credentials);
+  if (!projectId) {
+    debugLog("gemini", "fetchGeminiUsage: no project ID found");
+    return null;
+  }
+  const tokenHash = hashToken(credentials.accessToken);
+  const cacheFile = fileCachePath(`gemini-usage-${tokenHash}.json`);
+  const cached = geminiCacheMap.get(tokenHash);
+  if (cached) {
+    const ageSeconds = (Date.now() - cached.timestamp) / 1e3;
+    const effectiveTtl = cached.isError ? NEGATIVE_CACHE_SECONDS : ttlSeconds;
+    if (ageSeconds < effectiveTtl) {
+      if (cached.isError) {
+        debugLog("gemini", "Negative cache hit, skipping API call");
+        return null;
+      }
+      debugLog("gemini", "fetchGeminiUsage: returning cached data");
+      return cached.data;
+    }
+  }
+  const fromFile = await loadFileCache(cacheFile, ttlSeconds);
+  if (fromFile) {
+    debugLog("gemini", "file cache hit");
+    geminiCacheMap.set(tokenHash, { data: fromFile.data, timestamp: fromFile.timestamp });
+    return fromFile.data;
+  }
+  const pending = pendingRequests4.get(tokenHash);
+  if (pending) {
+    return pending;
+  }
+  const requestPromise = fetchFromGeminiApi(credentials, projectId);
+  pendingRequests4.set(tokenHash, requestPromise);
+  try {
+    const result = await requestPromise;
+    if (result) {
+      await saveFileCache(cacheFile, result);
+      return result;
+    }
+    debugLog("gemini", `Setting negative cache for ${NEGATIVE_CACHE_SECONDS}s`);
+    geminiCacheMap.set(tokenHash, {
+      data: null,
+      timestamp: Date.now(),
+      isError: true
+    });
+    if (cached && !cached.isError) {
+      debugLog("gemini", "Returning stale cache data");
+      return cached.data;
+    }
+    const staleFile = await loadFileCache(cacheFile, STALE_CACHE_TTL_SECONDS);
+    if (staleFile) {
+      debugLog("gemini", "stale file cache fallback");
+      return staleFile.data;
+    }
+    return null;
+  } finally {
+    pendingRequests4.delete(tokenHash);
+  }
+}
+async function fetchFromGeminiApi(credentials, projectId) {
+  try {
+    debugLog("gemini", "fetchFromGeminiApi: starting...");
+    const url = `${CODE_ASSIST_ENDPOINT}/${CODE_ASSIST_API_VERSION}:retrieveUserQuota`;
+    const response = await fetch(url, {
+      method: "POST",
+      headers: {
+        "Accept": "application/json",
+        "Content-Type": "application/json",
+        "User-Agent": `claude-dashboard/${VERSION}`,
+        "Authorization": `Bearer ${credentials.accessToken}`
+      },
+      body: JSON.stringify({
+        project: projectId
+      }),
+      signal: AbortSignal.timeout(API_TIMEOUT_MS4)
+    });
+    debugLog("gemini", "fetchFromGeminiApi: response status", response.status);
+    if (!response.ok) {
+      debugLog("gemini", "fetchFromGeminiApi: response not ok");
+      return null;
+    }
+    let data;
+    try {
+      data = await response.json();
+    } catch {
+      debugLog("gemini", "fetchFromGeminiApi: invalid JSON response");
+      return null;
+    }
+    if (!data || typeof data !== "object") {
+      debugLog("gemini", "fetchFromGeminiApi: invalid response - not an object");
+      return null;
+    }
+    const typedData = data;
+    debugLog("gemini", `fetchFromGeminiApi: got data ${typedData.buckets?.length || 0} buckets`);
+    const model = await getGeminiModel();
+    let primaryBucket = null;
+    let currentModelBucket = null;
+    if (typedData.buckets && Array.isArray(typedData.buckets)) {
+      for (const bucket of typedData.buckets) {
+        if (model && bucket.modelId && bucket.modelId.includes(model)) {
+          currentModelBucket = bucket;
+        }
+        if (!primaryBucket) {
+          primaryBucket = bucket;
+        }
+      }
+    }
+    const activeBucket = currentModelBucket || primaryBucket;
+    const displayModel = model ?? activeBucket?.modelId ?? "unknown";
+    const limits = {
+      model: displayModel,
+      // remainingFraction is remaining, so usage = 1 - remaining
+      usedPercent: activeBucket?.remainingFraction !== void 0 ? Math.round((1 - activeBucket.remainingFraction) * 100) : null,
+      resetAt: activeBucket?.resetTime ?? null,
+      buckets: typedData.buckets?.map((b) => ({
+        modelId: b.modelId,
+        usedPercent: b.remainingFraction !== void 0 ? Math.round((1 - b.remainingFraction) * 100) : null,
+        resetAt: b.resetTime ?? null
+      })) ?? []
+    };
+    const tokenHash = hashToken(credentials.accessToken);
+    geminiCacheMap.set(tokenHash, { data: limits, timestamp: Date.now() });
+    debugLog("gemini", "fetchFromGeminiApi: success", limits);
+    return limits;
+  } catch (err) {
+    debugLog("gemini", "fetchFromGeminiApi: error", err);
     return null;
   }
 }
@@ -1071,88 +2015,9 @@ function getTranslations(config) {
 }
 
 // scripts/widgets/model.ts
-import { readFile as readFile3, stat as stat3 } from "fs/promises";
+import { readFile as readFile5, stat as stat5 } from "fs/promises";
 import { join as join2 } from "path";
 import { homedir as homedir2 } from "os";
-
-// scripts/utils/formatters.ts
-function formatTokens(tokens) {
-  if (tokens >= 1e6) {
-    const value = tokens / 1e6;
-    return value >= 10 ? `${Math.round(value)}M` : `${value.toFixed(1)}M`;
-  }
-  if (tokens >= 1e3) {
-    const value = tokens / 1e3;
-    return value >= 10 ? `${Math.round(value)}K` : `${value.toFixed(1)}K`;
-  }
-  return String(tokens);
-}
-function formatCost(cost) {
-  return `$${cost.toFixed(2)}`;
-}
-function formatTimeRemaining(resetAt, t) {
-  const reset = typeof resetAt === "string" ? new Date(resetAt) : resetAt;
-  const now = /* @__PURE__ */ new Date();
-  const diffMs = reset.getTime() - now.getTime();
-  if (diffMs <= 0)
-    return `0${t.time.minutes}`;
-  const totalMinutes = Math.floor(diffMs / (1e3 * 60));
-  const totalHours = Math.floor(totalMinutes / 60);
-  const days = Math.floor(totalHours / 24);
-  const hours = totalHours % 24;
-  const minutes = totalMinutes % 60;
-  if (days > 0) {
-    return `${days}${t.time.days}${hours}${t.time.hours}`;
-  }
-  if (hours > 0) {
-    return `${hours}${t.time.hours}${minutes}${t.time.minutes}`;
-  }
-  return `${minutes}${t.time.minutes}`;
-}
-function shortenModelName(displayName) {
-  const lower = displayName.toLowerCase();
-  if (lower.includes("opus"))
-    return "Opus";
-  if (lower.includes("sonnet"))
-    return "Sonnet";
-  if (lower.includes("haiku"))
-    return "Haiku";
-  const parts = displayName.split(/\s+/);
-  if (parts.length > 1 && parts[0].toLowerCase() === "claude") {
-    return parts[1];
-  }
-  return displayName;
-}
-function calculatePercent(current, total) {
-  if (total <= 0)
-    return 0;
-  return Math.min(100, Math.round(current / total * 100));
-}
-function formatDuration(ms, t) {
-  if (ms <= 0)
-    return `0${t.minutes}`;
-  const totalMinutes = Math.floor(ms / (1e3 * 60));
-  const hours = Math.floor(totalMinutes / 60);
-  const minutes = totalMinutes % 60;
-  if (hours > 0 && minutes > 0) {
-    return `${hours}${t.hours}${minutes}${t.minutes}`;
-  }
-  if (hours > 0) {
-    return `${hours}${t.hours}`;
-  }
-  return `${minutes}${t.minutes}`;
-}
-function truncate(str, maxLen) {
-  return str.length <= maxLen ? str : str.slice(0, maxLen) + "\u2026";
-}
-function clampPercent(value) {
-  return Math.min(100, Math.max(0, Math.round(value)));
-}
-function osc8Link(url, text) {
-  return `\x1B]8;;${url}\x1B\\${text}\x1B]8;;\x1B\\`;
-}
-
-// scripts/widgets/model.ts
 var EFFORT_LEVELS = /* @__PURE__ */ new Set(["xhigh", "high", "medium", "low"]);
 function isEffortLevel(value) {
   return typeof value === "string" && EFFORT_LEVELS.has(value);
@@ -1169,14 +2034,14 @@ async function getModelSettings(modelId) {
   const defaultEffort = getDefaultEffort(modelId);
   const settingsPath = join2(homedir2(), ".claude", "settings.json");
   try {
-    const fileStat = await stat3(settingsPath);
+    const fileStat = await stat5(settingsPath);
     if (settingsCache && settingsCache.mtime === fileStat.mtimeMs) {
       return {
         effortLevel: isEffortLevel(settingsCache.rawEffort) ? settingsCache.rawEffort : defaultEffort,
         fastMode: settingsCache.fastMode
       };
     }
-    const content = await readFile3(settingsPath, "utf-8");
+    const content = await readFile5(settingsPath, "utf-8");
     const settings = JSON.parse(content);
     const rawEffort = settings.effortLevel;
     const fastMode = settings.fastMode === true;
@@ -1394,10 +2259,10 @@ var rateLimit7dSonnetWidget = {
 import { basename, relative } from "path";
 
 // scripts/utils/git.ts
-import { execFile as execFile3 } from "child_process";
+import { execFile as execFile5 } from "child_process";
 function execGit(args, cwd, timeout) {
   return new Promise((resolve, reject) => {
-    execFile3("git", ["--no-optional-locks", ...args], {
+    execFile5("git", ["--no-optional-locks", ...args], {
       cwd,
       encoding: "utf-8",
       timeout
@@ -1411,7 +2276,7 @@ function execGit(args, cwd, timeout) {
 }
 function countUntrackedLines(cwd, timeout) {
   return new Promise((resolve) => {
-    execFile3(
+    execFile5(
       "sh",
       ["-c", "git --no-optional-locks ls-files --others --exclude-standard -z | xargs -0 cat 2>/dev/null | wc -l"],
       { cwd, encoding: "utf-8", timeout },
@@ -1545,7 +2410,7 @@ var projectInfoWidget = {
 };
 
 // scripts/widgets/config-counts.ts
-import { readdir as readdir2, readFile as readFile4, stat as stat4 } from "fs/promises";
+import { readdir as readdir2, readFile as readFile6, stat as stat6 } from "fs/promises";
 import { join as join3 } from "path";
 var CONFIG_CACHE_TTL_MS = 3e4;
 var EMPTY_FS_COUNTS = { claudeMd: 0, agentsMd: 0, rules: 0, mcps: 0, hooks: 0 };
@@ -1563,7 +2428,7 @@ async function countFiles(dir, pattern) {
 }
 async function fileExists(path4) {
   try {
-    await stat4(path4);
+    await stat6(path4);
     return true;
   } catch {
     return false;
@@ -1593,7 +2458,7 @@ async function countMcps(projectDir) {
   const counts = await Promise.all(
     mcpPaths.map(async ({ path: path4, key }) => {
       try {
-        const content = await readFile4(path4, "utf-8");
+        const content = await readFile6(path4, "utf-8");
         const config = JSON.parse(content);
         return Object.keys(config[key] || {}).length;
       } catch {
@@ -1658,7 +2523,7 @@ var configCountsWidget = {
 };
 
 // scripts/utils/session.ts
-import { readFile as readFile5, mkdir as mkdir2, open, readdir as readdir3, unlink as unlink2, stat as stat5 } from "fs/promises";
+import { readFile as readFile7, mkdir as mkdir3, open, readdir as readdir3, unlink as unlink2, stat as stat7 } from "fs/promises";
 import { join as join4 } from "path";
 import { homedir as homedir3 } from "os";
 var SESSION_DIR = join4(homedir3(), ".cache", "claude-dashboard", "sessions");
@@ -1669,7 +2534,7 @@ function isErrnoException(error, code) {
 }
 var lastCleanupTime2 = 0;
 var sessionCache = /* @__PURE__ */ new Map();
-var pendingRequests2 = /* @__PURE__ */ new Map();
+var pendingRequests5 = /* @__PURE__ */ new Map();
 function sanitizeSessionId(sessionId) {
   return sessionId.replace(/[^a-zA-Z0-9-_]/g, "");
 }
@@ -1678,22 +2543,22 @@ async function getSessionStartTime(sessionId) {
   if (sessionCache.has(safeSessionId)) {
     return sessionCache.get(safeSessionId);
   }
-  const pending = pendingRequests2.get(safeSessionId);
+  const pending = pendingRequests5.get(safeSessionId);
   if (pending) {
     return pending;
   }
   const promise = getOrCreateSessionStartTimeImpl(safeSessionId);
-  pendingRequests2.set(safeSessionId, promise);
+  pendingRequests5.set(safeSessionId, promise);
   try {
     return await promise;
   } finally {
-    pendingRequests2.delete(safeSessionId);
+    pendingRequests5.delete(safeSessionId);
   }
 }
 async function getOrCreateSessionStartTimeImpl(safeSessionId) {
   const sessionFile = join4(SESSION_DIR, `${safeSessionId}.json`);
   try {
-    const content = await readFile5(sessionFile, "utf-8");
+    const content = await readFile7(sessionFile, "utf-8");
     const data = JSON.parse(content);
     if (typeof data.startTime !== "number") {
       debugLog("session", `Invalid session file format for ${safeSessionId}`);
@@ -1707,7 +2572,7 @@ async function getOrCreateSessionStartTimeImpl(safeSessionId) {
     }
     const startTime = Date.now();
     try {
-      await mkdir2(SESSION_DIR, { recursive: true });
+      await mkdir3(SESSION_DIR, { recursive: true });
       const fileHandle = await open(sessionFile, "wx");
       try {
         await fileHandle.writeFile(JSON.stringify({ startTime }), "utf-8");
@@ -1721,7 +2586,7 @@ async function getOrCreateSessionStartTimeImpl(safeSessionId) {
     } catch (writeError) {
       if (isErrnoException(writeError, "EEXIST")) {
         try {
-          const content = await readFile5(sessionFile, "utf-8");
+          const content = await readFile7(sessionFile, "utf-8");
           const data = JSON.parse(content);
           if (typeof data.startTime === "number") {
             sessionCache.set(safeSessionId, data.startTime);
@@ -1765,7 +2630,7 @@ async function cleanupExpiredSessions() {
         continue;
       try {
         const filePath = join4(SESSION_DIR, file);
-        const fileStat = await stat5(filePath);
+        const fileStat = await stat7(filePath);
         if (fileStat.mtimeMs < cutoffTime) {
           await unlink2(filePath);
           debugLog("session", `Cleaned up expired session: ${file}`);
@@ -1798,7 +2663,7 @@ var sessionDurationWidget = {
 };
 
 // scripts/utils/transcript-parser.ts
-import { open as open2, stat as stat6 } from "fs/promises";
+import { open as open2, stat as stat8 } from "fs/promises";
 import { basename as basename2 } from "path";
 var cachedTranscript = null;
 function createParsedTranscript() {
@@ -1964,7 +2829,7 @@ async function readFromOffset(filePath, offset, fileSize) {
 }
 async function parseTranscript(transcriptPath) {
   try {
-    const fileStat = await stat6(transcriptPath);
+    const fileStat = await stat8(transcriptPath);
     const fileSize = fileStat.size;
     if (cachedTranscript?.path === transcriptPath && cachedTranscript.size <= fileSize) {
       if (cachedTranscript.size === fileSize) {
@@ -2275,252 +3140,6 @@ var cacheHitWidget = {
   }
 };
 
-// scripts/utils/codex-client.ts
-import { readFile as readFile6, stat as stat7, writeFile as writeFile2, mkdir as mkdir3 } from "fs/promises";
-import { execFile as execFile4 } from "child_process";
-import os2 from "os";
-import path2 from "path";
-var API_TIMEOUT_MS2 = 5e3;
-var CODEX_AUTH_PATH = path2.join(os2.homedir(), ".codex", "auth.json");
-var CODEX_CONFIG_PATH = path2.join(os2.homedir(), ".codex", "config.toml");
-var MODEL_CACHE_PATH = path2.join(FILE_CACHE_DIR, "codex-model-cache.json");
-var codexCacheMap = /* @__PURE__ */ new Map();
-var pendingRequests3 = /* @__PURE__ */ new Map();
-var cachedAuth = null;
-function isValidCodexApiResponse(data) {
-  return data !== null && typeof data === "object" && "rate_limit" in data && "plan_type" in data && typeof data.rate_limit === "object" && data.rate_limit !== null;
-}
-async function isCodexInstalled() {
-  try {
-    await stat7(CODEX_AUTH_PATH);
-    return true;
-  } catch {
-    return false;
-  }
-}
-async function getCodexAuth() {
-  try {
-    const fileStat = await stat7(CODEX_AUTH_PATH);
-    if (cachedAuth && cachedAuth.mtime === fileStat.mtimeMs) {
-      return cachedAuth.data;
-    }
-    const raw = await readFile6(CODEX_AUTH_PATH, "utf-8");
-    const json = JSON.parse(raw);
-    const accessToken = json?.tokens?.access_token;
-    const accountId = json?.tokens?.account_id;
-    if (!accessToken || !accountId) {
-      return null;
-    }
-    const data = { accessToken, accountId };
-    cachedAuth = { data, mtime: fileStat.mtimeMs };
-    return data;
-  } catch {
-    return null;
-  }
-}
-async function getModelFromConfig() {
-  try {
-    const raw = await readFile6(CODEX_CONFIG_PATH, "utf-8");
-    const match = raw.match(/^model\s*=\s*["']([^"']+)["']\s*(?:#.*)?$/m);
-    return match ? match[1] : null;
-  } catch {
-    return null;
-  }
-}
-async function getConfigMtime() {
-  try {
-    const fileStat = await stat7(CODEX_CONFIG_PATH);
-    return fileStat.mtimeMs;
-  } catch {
-    return 0;
-  }
-}
-async function getCachedModel(currentMtime) {
-  try {
-    const raw = await readFile6(MODEL_CACHE_PATH, "utf-8");
-    const cache = JSON.parse(raw);
-    if (cache.configMtime === currentMtime && cache.model) {
-      debugLog("codex", "getCachedModel: cache hit", cache.model);
-      return cache.model;
-    }
-    debugLog("codex", "getCachedModel: cache stale");
-    return null;
-  } catch {
-    return null;
-  }
-}
-async function saveModelCache(model, configMtime) {
-  try {
-    await mkdir3(FILE_CACHE_DIR, { recursive: true });
-    const cache = { model, configMtime };
-    await writeFile2(MODEL_CACHE_PATH, JSON.stringify(cache), "utf-8");
-    debugLog("codex", "saveModelCache: saved", model);
-  } catch (err) {
-    debugLog("codex", "saveModelCache: error", err);
-  }
-}
-var modelDetectionFailedAt = null;
-var MODEL_DETECTION_BACKOFF_MS = 3e5;
-async function detectModelFromCodexExec() {
-  if (modelDetectionFailedAt !== null && Date.now() - modelDetectionFailedAt < MODEL_DETECTION_BACKOFF_MS) {
-    debugLog("codex", "detectModelFromCodexExec: skipping (backoff)");
-    return null;
-  }
-  try {
-    debugLog("codex", "detectModelFromCodexExec: running codex exec...");
-    const output = await new Promise((resolve, reject) => {
-      execFile4("codex", ["exec", "1+1="], {
-        encoding: "utf-8",
-        timeout: 1e4
-      }, (error, stdout) => {
-        if (error)
-          reject(error);
-        else
-          resolve(stdout);
-      });
-    });
-    const match = output.match(/^model:\s*(.+)$/m);
-    if (match) {
-      const model = match[1].trim();
-      debugLog("codex", "detectModelFromCodexExec: detected", model);
-      modelDetectionFailedAt = null;
-      return model;
-    }
-    debugLog("codex", "detectModelFromCodexExec: no model line found");
-    modelDetectionFailedAt = Date.now();
-    return null;
-  } catch (err) {
-    debugLog("codex", "detectModelFromCodexExec: error", err);
-    modelDetectionFailedAt = Date.now();
-    return null;
-  }
-}
-async function getCodexModel() {
-  const configModel = await getModelFromConfig();
-  if (configModel) {
-    debugLog("codex", "getCodexModel: from config", configModel);
-    return configModel;
-  }
-  const configMtime = await getConfigMtime();
-  const cachedModel = await getCachedModel(configMtime);
-  if (cachedModel) {
-    return cachedModel;
-  }
-  const detectedModel = await detectModelFromCodexExec();
-  if (detectedModel) {
-    await saveModelCache(detectedModel, configMtime);
-    return detectedModel;
-  }
-  return null;
-}
-async function fetchCodexUsage(ttlSeconds = 60) {
-  const auth = await getCodexAuth();
-  if (!auth) {
-    return null;
-  }
-  const tokenHash = hashToken(auth.accessToken);
-  const cacheFile = fileCachePath(`codex-usage-${tokenHash}.json`);
-  const cached = codexCacheMap.get(tokenHash);
-  if (cached) {
-    const ageSeconds = (Date.now() - cached.timestamp) / 1e3;
-    const effectiveTtl = cached.isError ? NEGATIVE_CACHE_SECONDS : ttlSeconds;
-    if (ageSeconds < effectiveTtl) {
-      if (cached.isError) {
-        debugLog("codex", "Negative cache hit, skipping API call");
-        return null;
-      }
-      return cached.data;
-    }
-  }
-  const fromFile = await loadFileCache(cacheFile, ttlSeconds);
-  if (fromFile) {
-    debugLog("codex", "file cache hit");
-    codexCacheMap.set(tokenHash, { data: fromFile.data, timestamp: fromFile.timestamp });
-    return fromFile.data;
-  }
-  const pending = pendingRequests3.get(tokenHash);
-  if (pending) {
-    return pending;
-  }
-  const requestPromise = fetchFromCodexApi(auth, tokenHash);
-  pendingRequests3.set(tokenHash, requestPromise);
-  try {
-    const result = await requestPromise;
-    if (result) {
-      await saveFileCache(cacheFile, result);
-      return result;
-    }
-    debugLog("codex", `Setting negative cache for ${NEGATIVE_CACHE_SECONDS}s`);
-    codexCacheMap.set(tokenHash, {
-      data: null,
-      timestamp: Date.now(),
-      isError: true
-    });
-    if (cached && !cached.isError) {
-      debugLog("codex", "Returning stale cache data");
-      return cached.data;
-    }
-    const staleFile = await loadFileCache(cacheFile, STALE_CACHE_TTL_SECONDS);
-    if (staleFile) {
-      debugLog("codex", "stale file cache fallback");
-      return staleFile.data;
-    }
-    return null;
-  } finally {
-    pendingRequests3.delete(tokenHash);
-  }
-}
-async function fetchFromCodexApi(auth, tokenHash) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), API_TIMEOUT_MS2);
-  try {
-    debugLog("codex", "fetchFromCodexApi: starting...");
-    const response = await fetch("https://chatgpt.com/backend-api/wham/usage", {
-      method: "GET",
-      headers: {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "User-Agent": `claude-dashboard/${VERSION}`,
-        "Authorization": `Bearer ${auth.accessToken}`,
-        "ChatGPT-Account-Id": auth.accountId
-      },
-      signal: controller.signal
-    });
-    debugLog("codex", "fetchFromCodexApi: response status", response.status);
-    if (!response.ok) {
-      debugLog("codex", "fetchFromCodexApi: response not ok");
-      return null;
-    }
-    const data = await response.json();
-    if (!isValidCodexApiResponse(data)) {
-      debugLog("codex", "fetchFromCodexApi: invalid response structure");
-      return null;
-    }
-    debugLog("codex", "fetchFromCodexApi: got data", data.plan_type);
-    const model = await getCodexModel();
-    const limits = {
-      model: model ?? "unknown",
-      planType: data.plan_type,
-      primary: data.rate_limit.primary_window ? {
-        usedPercent: data.rate_limit.primary_window.used_percent,
-        resetAt: data.rate_limit.primary_window.reset_at
-      } : null,
-      secondary: data.rate_limit.secondary_window ? {
-        usedPercent: data.rate_limit.secondary_window.used_percent,
-        resetAt: data.rate_limit.secondary_window.reset_at
-      } : null
-    };
-    codexCacheMap.set(tokenHash, { data: limits, timestamp: Date.now() });
-    debugLog("codex", "fetchFromCodexApi: success", limits);
-    return limits;
-  } catch (err) {
-    debugLog("codex", "fetchFromCodexApi: error", err);
-    return null;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
 // scripts/widgets/codex-usage.ts
 function formatRateLimit(label, percent, resetAt, ctx) {
   const color = getColorForPercent(percent);
@@ -2542,11 +3161,14 @@ var codexUsageWidget = {
     if (!installed) {
       return null;
     }
-    const limits = await fetchCodexUsage(ctx.config.cache.ttlSeconds);
+    const [modelHint, limits] = await Promise.all([
+      getCodexModel({ cacheOnly: ctx.fast }),
+      fetchCodexUsage(ctx.config.cache.ttlSeconds, { cacheOnly: ctx.fast })
+    ]);
     debugLog("codex", "fetchCodexUsage result:", limits);
     if (!limits) {
       return {
-        model: "codex",
+        model: modelHint ?? "codex",
         planType: "",
         primaryPercent: null,
         primaryResetAt: null,
@@ -2556,7 +3178,7 @@ var codexUsageWidget = {
       };
     }
     return {
-      model: limits.model,
+      model: modelHint ?? limits.model,
       planType: limits.planType,
       primaryPercent: limits.primary?.usedPercent ?? null,
       primaryResetAt: limits.primary?.resetAt ?? null,
@@ -2583,429 +3205,6 @@ var codexUsageWidget = {
   }
 };
 
-// scripts/utils/gemini-client.ts
-import { readFile as readFile7, writeFile as writeFile3, stat as stat8 } from "fs/promises";
-import { execFile as execFile5 } from "child_process";
-import os3 from "os";
-import path3 from "path";
-var API_TIMEOUT_MS3 = 5e3;
-var GEMINI_DIR = ".gemini";
-var OAUTH_CREDS_FILE = "oauth_creds.json";
-var SETTINGS_FILE = "settings.json";
-var KEYCHAIN_SERVICE_NAME = "gemini-cli-oauth";
-var MAIN_ACCOUNT_KEY = "main-account";
-var CODE_ASSIST_ENDPOINT = "https://cloudcode-pa.googleapis.com";
-var CODE_ASSIST_API_VERSION = "v1internal";
-var GOOGLE_TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
-var OAUTH_CLIENT_ID = "681255809395-oo8ft2oprdrnp9e3aqf6av3hmdib135j.apps.googleusercontent.com";
-var OAUTH_CLIENT_SECRET = "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";
-var TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1e3;
-var geminiCacheMap = /* @__PURE__ */ new Map();
-var pendingRequests4 = /* @__PURE__ */ new Map();
-var pendingRefreshRequests = /* @__PURE__ */ new Map();
-var cachedCredentials = null;
-var keychainCache = null;
-var KEYCHAIN_CACHE_TTL_MS2 = 1e4;
-var cachedSettings = null;
-function getGeminiDir() {
-  return path3.join(os3.homedir(), GEMINI_DIR);
-}
-async function isGeminiInstalled() {
-  try {
-    const keychainToken = await getTokenFromKeychain();
-    if (keychainToken) {
-      return true;
-    }
-    const oauthPath = path3.join(getGeminiDir(), OAUTH_CREDS_FILE);
-    await stat8(oauthPath);
-    return true;
-  } catch {
-    return false;
-  }
-}
-async function getTokenFromKeychain() {
-  if (os3.platform() !== "darwin") {
-    return null;
-  }
-  if (keychainCache && Date.now() - keychainCache.timestamp < KEYCHAIN_CACHE_TTL_MS2) {
-    return keychainCache.data;
-  }
-  try {
-    const result = await new Promise((resolve, reject) => {
-      execFile5(
-        "security",
-        ["find-generic-password", "-s", KEYCHAIN_SERVICE_NAME, "-a", MAIN_ACCOUNT_KEY, "-w"],
-        { encoding: "utf-8", timeout: 3e3 },
-        (error, stdout) => {
-          if (error)
-            reject(error);
-          else
-            resolve(stdout.trim());
-        }
-      );
-    });
-    if (!result) {
-      keychainCache = { data: null, timestamp: Date.now() };
-      return null;
-    }
-    const stored = JSON.parse(result);
-    if (!stored.token?.accessToken) {
-      keychainCache = { data: null, timestamp: Date.now() };
-      return null;
-    }
-    const data = {
-      accessToken: stored.token.accessToken,
-      refreshToken: stored.token.refreshToken,
-      expiryDate: stored.token.expiresAt
-    };
-    keychainCache = { data, timestamp: Date.now() };
-    return data;
-  } catch {
-    keychainCache = { data: null, timestamp: Date.now() };
-    return null;
-  }
-}
-async function getCredentialsFromFile2() {
-  try {
-    const oauthPath = path3.join(getGeminiDir(), OAUTH_CREDS_FILE);
-    const fileStat = await stat8(oauthPath);
-    if (cachedCredentials && cachedCredentials.mtime === fileStat.mtimeMs) {
-      return cachedCredentials.data;
-    }
-    const raw = await readFile7(oauthPath, "utf-8");
-    const json = JSON.parse(raw);
-    const accessToken = json?.access_token;
-    if (!accessToken) {
-      return null;
-    }
-    const data = {
-      accessToken,
-      refreshToken: json?.refresh_token,
-      expiryDate: json?.expiry_date
-    };
-    cachedCredentials = { data, mtime: fileStat.mtimeMs };
-    return data;
-  } catch {
-    return null;
-  }
-}
-async function getGeminiCredentials() {
-  const keychainCreds = await getTokenFromKeychain();
-  if (keychainCreds) {
-    return keychainCreds;
-  }
-  return getCredentialsFromFile2();
-}
-function tokenNeedsRefresh(credentials) {
-  if (!credentials.expiryDate) {
-    return false;
-  }
-  return credentials.expiryDate < Date.now() + TOKEN_REFRESH_BUFFER_MS;
-}
-async function refreshTokenInternal(credentials) {
-  try {
-    debugLog("gemini", "refreshTokenInternal: attempting refresh...");
-    const response = await fetch(GOOGLE_TOKEN_ENDPOINT, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded"
-      },
-      body: new URLSearchParams({
-        grant_type: "refresh_token",
-        refresh_token: credentials.refreshToken,
-        client_id: OAUTH_CLIENT_ID,
-        client_secret: OAUTH_CLIENT_SECRET
-      }),
-      signal: AbortSignal.timeout(API_TIMEOUT_MS3)
-    });
-    if (!response.ok) {
-      debugLog("gemini", "refreshTokenInternal: failed", response.status);
-      return null;
-    }
-    const data = await response.json();
-    if (!data.access_token) {
-      debugLog("gemini", "refreshTokenInternal: no access_token in response");
-      return null;
-    }
-    const newCredentials = {
-      accessToken: data.access_token,
-      refreshToken: data.refresh_token || credentials.refreshToken,
-      expiryDate: Date.now() + data.expires_in * 1e3
-    };
-    await saveCredentialsToFile(newCredentials, data);
-    cachedCredentials = null;
-    debugLog("gemini", "refreshTokenInternal: success, new expiry", new Date(newCredentials.expiryDate).toISOString());
-    return newCredentials;
-  } catch (err) {
-    debugLog("gemini", "refreshTokenInternal: error", err);
-    return null;
-  }
-}
-async function refreshToken(credentials) {
-  if (!credentials.refreshToken) {
-    debugLog("gemini", "refreshToken: no refresh token available");
-    return null;
-  }
-  const tokenHash = hashToken(credentials.accessToken);
-  const pending = pendingRefreshRequests.get(tokenHash);
-  if (pending) {
-    debugLog("gemini", "refreshToken: using pending refresh request");
-    return pending;
-  }
-  const refreshPromise = refreshTokenInternal(credentials).finally(() => {
-    pendingRefreshRequests.delete(tokenHash);
-  });
-  pendingRefreshRequests.set(tokenHash, refreshPromise);
-  return refreshPromise;
-}
-async function saveCredentialsToFile(credentials, rawResponse) {
-  try {
-    const oauthPath = path3.join(getGeminiDir(), OAUTH_CREDS_FILE);
-    let existingData = {};
-    try {
-      const raw = await readFile7(oauthPath, "utf-8");
-      existingData = JSON.parse(raw);
-    } catch {
-    }
-    const newData = {
-      ...existingData,
-      access_token: credentials.accessToken,
-      refresh_token: credentials.refreshToken,
-      expiry_date: credentials.expiryDate,
-      token_type: rawResponse.token_type || "Bearer",
-      scope: rawResponse.scope || existingData.scope
-    };
-    await writeFile3(oauthPath, JSON.stringify(newData, null, 2), { mode: 384 });
-    debugLog("gemini", "saveCredentialsToFile: saved");
-  } catch (err) {
-    debugLog("gemini", "saveCredentialsToFile: error", err);
-  }
-}
-async function getValidCredentials() {
-  let credentials = await getGeminiCredentials();
-  if (!credentials) {
-    return null;
-  }
-  if (tokenNeedsRefresh(credentials)) {
-    debugLog("gemini", "getValidCredentials: token expired or expiring, attempting refresh");
-    const refreshedCreds = await refreshToken(credentials);
-    if (refreshedCreds) {
-      return refreshedCreds;
-    }
-    debugLog("gemini", "getValidCredentials: refresh failed");
-    return null;
-  }
-  return credentials;
-}
-var projectIdCacheMap = /* @__PURE__ */ new Map();
-var PROJECT_ID_CACHE_TTL_MS = 5 * 60 * 1e3;
-async function getGeminiSettings() {
-  try {
-    const settingsPath = path3.join(getGeminiDir(), SETTINGS_FILE);
-    const fileStat = await stat8(settingsPath);
-    if (cachedSettings && cachedSettings.mtime === fileStat.mtimeMs) {
-      return cachedSettings.data;
-    }
-    const raw = await readFile7(settingsPath, "utf-8");
-    const json = JSON.parse(raw);
-    const data = {
-      cloudaicompanionProject: json?.cloudaicompanionProject,
-      selectedModel: json?.selectedModel || json?.model?.name,
-      auth: json?.auth
-    };
-    cachedSettings = { data, mtime: fileStat.mtimeMs };
-    return data;
-  } catch {
-    return null;
-  }
-}
-async function getGeminiModel() {
-  const settings = await getGeminiSettings();
-  return settings?.selectedModel ?? null;
-}
-async function getProjectId(credentials) {
-  const envProjectId = process.env["GOOGLE_CLOUD_PROJECT"] || process.env["GOOGLE_CLOUD_PROJECT_ID"];
-  if (envProjectId) {
-    return envProjectId;
-  }
-  const settings = await getGeminiSettings();
-  if (settings?.cloudaicompanionProject) {
-    return settings.cloudaicompanionProject;
-  }
-  const tokenHash = hashToken(credentials.accessToken);
-  const cached = projectIdCacheMap.get(tokenHash);
-  if (cached && Date.now() - cached.timestamp < PROJECT_ID_CACHE_TTL_MS) {
-    return cached.data;
-  }
-  try {
-    const url = `${CODE_ASSIST_ENDPOINT}/${CODE_ASSIST_API_VERSION}:loadCodeAssist`;
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "User-Agent": `claude-dashboard/${VERSION}`,
-        "Authorization": `Bearer ${credentials.accessToken}`
-      },
-      body: JSON.stringify({
-        metadata: {
-          ideType: "GEMINI_CLI",
-          platform: "PLATFORM_UNSPECIFIED",
-          pluginType: "GEMINI"
-        }
-      }),
-      signal: AbortSignal.timeout(API_TIMEOUT_MS3)
-    });
-    if (!response.ok) {
-      debugLog("gemini", "loadCodeAssist: response not ok", response.status);
-      return null;
-    }
-    const data = await response.json();
-    const projectId = data?.cloudaicompanionProject;
-    if (projectId) {
-      projectIdCacheMap.set(tokenHash, { data: projectId, timestamp: Date.now() });
-      return projectId;
-    }
-  } catch (err) {
-    debugLog("gemini", "loadCodeAssist error:", err);
-  }
-  return null;
-}
-async function fetchGeminiUsage(ttlSeconds = 60) {
-  const credentials = await getValidCredentials();
-  if (!credentials) {
-    debugLog("gemini", "fetchGeminiUsage: no valid credentials");
-    return null;
-  }
-  const projectId = await getProjectId(credentials);
-  if (!projectId) {
-    debugLog("gemini", "fetchGeminiUsage: no project ID found");
-    return null;
-  }
-  const tokenHash = hashToken(credentials.accessToken);
-  const cacheFile = fileCachePath(`gemini-usage-${tokenHash}.json`);
-  const cached = geminiCacheMap.get(tokenHash);
-  if (cached) {
-    const ageSeconds = (Date.now() - cached.timestamp) / 1e3;
-    const effectiveTtl = cached.isError ? NEGATIVE_CACHE_SECONDS : ttlSeconds;
-    if (ageSeconds < effectiveTtl) {
-      if (cached.isError) {
-        debugLog("gemini", "Negative cache hit, skipping API call");
-        return null;
-      }
-      debugLog("gemini", "fetchGeminiUsage: returning cached data");
-      return cached.data;
-    }
-  }
-  const fromFile = await loadFileCache(cacheFile, ttlSeconds);
-  if (fromFile) {
-    debugLog("gemini", "file cache hit");
-    geminiCacheMap.set(tokenHash, { data: fromFile.data, timestamp: fromFile.timestamp });
-    return fromFile.data;
-  }
-  const pending = pendingRequests4.get(tokenHash);
-  if (pending) {
-    return pending;
-  }
-  const requestPromise = fetchFromGeminiApi(credentials, projectId);
-  pendingRequests4.set(tokenHash, requestPromise);
-  try {
-    const result = await requestPromise;
-    if (result) {
-      await saveFileCache(cacheFile, result);
-      return result;
-    }
-    debugLog("gemini", `Setting negative cache for ${NEGATIVE_CACHE_SECONDS}s`);
-    geminiCacheMap.set(tokenHash, {
-      data: null,
-      timestamp: Date.now(),
-      isError: true
-    });
-    if (cached && !cached.isError) {
-      debugLog("gemini", "Returning stale cache data");
-      return cached.data;
-    }
-    const staleFile = await loadFileCache(cacheFile, STALE_CACHE_TTL_SECONDS);
-    if (staleFile) {
-      debugLog("gemini", "stale file cache fallback");
-      return staleFile.data;
-    }
-    return null;
-  } finally {
-    pendingRequests4.delete(tokenHash);
-  }
-}
-async function fetchFromGeminiApi(credentials, projectId) {
-  try {
-    debugLog("gemini", "fetchFromGeminiApi: starting...");
-    const url = `${CODE_ASSIST_ENDPOINT}/${CODE_ASSIST_API_VERSION}:retrieveUserQuota`;
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "User-Agent": `claude-dashboard/${VERSION}`,
-        "Authorization": `Bearer ${credentials.accessToken}`
-      },
-      body: JSON.stringify({
-        project: projectId
-      }),
-      signal: AbortSignal.timeout(API_TIMEOUT_MS3)
-    });
-    debugLog("gemini", "fetchFromGeminiApi: response status", response.status);
-    if (!response.ok) {
-      debugLog("gemini", "fetchFromGeminiApi: response not ok");
-      return null;
-    }
-    let data;
-    try {
-      data = await response.json();
-    } catch {
-      debugLog("gemini", "fetchFromGeminiApi: invalid JSON response");
-      return null;
-    }
-    if (!data || typeof data !== "object") {
-      debugLog("gemini", "fetchFromGeminiApi: invalid response - not an object");
-      return null;
-    }
-    const typedData = data;
-    debugLog("gemini", `fetchFromGeminiApi: got data ${typedData.buckets?.length || 0} buckets`);
-    const model = await getGeminiModel();
-    let primaryBucket = null;
-    let currentModelBucket = null;
-    if (typedData.buckets && Array.isArray(typedData.buckets)) {
-      for (const bucket of typedData.buckets) {
-        if (model && bucket.modelId && bucket.modelId.includes(model)) {
-          currentModelBucket = bucket;
-        }
-        if (!primaryBucket) {
-          primaryBucket = bucket;
-        }
-      }
-    }
-    const activeBucket = currentModelBucket || primaryBucket;
-    const displayModel = model ?? activeBucket?.modelId ?? "unknown";
-    const limits = {
-      model: displayModel,
-      // remainingFraction is remaining, so usage = 1 - remaining
-      usedPercent: activeBucket?.remainingFraction !== void 0 ? Math.round((1 - activeBucket.remainingFraction) * 100) : null,
-      resetAt: activeBucket?.resetTime ?? null,
-      buckets: typedData.buckets?.map((b) => ({
-        modelId: b.modelId,
-        usedPercent: b.remainingFraction !== void 0 ? Math.round((1 - b.remainingFraction) * 100) : null,
-        resetAt: b.resetTime ?? null
-      })) ?? []
-    };
-    const tokenHash = hashToken(credentials.accessToken);
-    geminiCacheMap.set(tokenHash, { data: limits, timestamp: Date.now() });
-    debugLog("gemini", "fetchFromGeminiApi: success", limits);
-    return limits;
-  } catch (err) {
-    debugLog("gemini", "fetchFromGeminiApi: error", err);
-    return null;
-  }
-}
-
 // scripts/widgets/gemini-usage.ts
 function formatUsage(percent, resetAt, ctx) {
   const color = getColorForPercent(percent);
@@ -3027,7 +3226,7 @@ var geminiUsageWidget = {
     if (!installed) {
       return null;
     }
-    const limits = await fetchGeminiUsage(ctx.config.cache.ttlSeconds);
+    const limits = await fetchGeminiUsage(ctx.config.cache.ttlSeconds, { cacheOnly: ctx.fast });
     debugLog("gemini", "fetchGeminiUsage result:", limits);
     if (!limits) {
       return {
@@ -3064,7 +3263,7 @@ var geminiUsageAllWidget = {
     if (!installed) {
       return null;
     }
-    const limits = await fetchGeminiUsage(ctx.config.cache.ttlSeconds);
+    const limits = await fetchGeminiUsage(ctx.config.cache.ttlSeconds, { cacheOnly: ctx.fast });
     debugLog("gemini", "geminiUsageAll - fetchGeminiUsage result:", limits);
     if (!limits) {
       return {
@@ -3099,170 +3298,6 @@ var geminiUsageAllWidget = {
   }
 };
 
-// scripts/utils/zai-api-client.ts
-var API_TIMEOUT_MS4 = 5e3;
-function calculateUsagePercent(currentValue, remaining) {
-  const total = currentValue + remaining;
-  if (total <= 0) {
-    return null;
-  }
-  return clampPercent(currentValue / total * 100);
-}
-function parseUsagePercent(limit) {
-  if (limit.percentage !== void 0) {
-    return clampPercent(limit.percentage);
-  }
-  if (limit.currentValue !== void 0 && limit.remaining !== void 0) {
-    return calculateUsagePercent(limit.currentValue, limit.remaining);
-  }
-  if (limit.currentValue !== void 0 && limit.usage !== void 0 && limit.usage > 0) {
-    return clampPercent(limit.currentValue / limit.usage * 100);
-  }
-  return null;
-}
-var zaiCacheMap = /* @__PURE__ */ new Map();
-var pendingRequests5 = /* @__PURE__ */ new Map();
-function isZaiInstalled() {
-  return isZaiProvider() && !!getZaiApiBaseUrl() && !!getZaiAuthToken();
-}
-function getZaiAuthToken() {
-  return process.env.ANTHROPIC_AUTH_TOKEN || null;
-}
-async function fetchZaiUsage(ttlSeconds = 60) {
-  if (!isZaiProvider()) {
-    debugLog("zai", "fetchZaiUsage: not a z.ai provider");
-    return null;
-  }
-  const baseUrl = getZaiApiBaseUrl();
-  const authToken = getZaiAuthToken();
-  if (!baseUrl || !authToken) {
-    debugLog("zai", "fetchZaiUsage: missing base URL or auth token");
-    return null;
-  }
-  const tokenHash = hashToken(authToken);
-  const cacheKey = `${baseUrl}:${tokenHash}`;
-  const cacheFile = fileCachePath(`zai-usage-${hashToken(cacheKey)}.json`);
-  const cached = zaiCacheMap.get(cacheKey);
-  if (cached) {
-    const ageSeconds = (Date.now() - cached.timestamp) / 1e3;
-    const effectiveTtl = cached.isError ? NEGATIVE_CACHE_SECONDS : ttlSeconds;
-    if (ageSeconds < effectiveTtl) {
-      if (cached.isError) {
-        debugLog("zai", "Negative cache hit, skipping API call");
-        return null;
-      }
-      debugLog("zai", "fetchZaiUsage: returning cached data");
-      return cached.data;
-    }
-  }
-  const fromFile = await loadFileCache(cacheFile, ttlSeconds);
-  if (fromFile) {
-    debugLog("zai", "file cache hit");
-    zaiCacheMap.set(cacheKey, { data: fromFile.data, timestamp: fromFile.timestamp });
-    return fromFile.data;
-  }
-  const pending = pendingRequests5.get(cacheKey);
-  if (pending) {
-    return pending;
-  }
-  const requestPromise = fetchFromZaiApi(baseUrl, authToken);
-  pendingRequests5.set(cacheKey, requestPromise);
-  try {
-    const result = await requestPromise;
-    if (result) {
-      zaiCacheMap.set(cacheKey, { data: result, timestamp: Date.now() });
-      await saveFileCache(cacheFile, result);
-      return result;
-    }
-    debugLog("zai", `Setting negative cache for ${NEGATIVE_CACHE_SECONDS}s`);
-    zaiCacheMap.set(cacheKey, {
-      data: null,
-      timestamp: Date.now(),
-      isError: true
-    });
-    if (cached && !cached.isError) {
-      debugLog("zai", "Returning stale cache data");
-      return cached.data;
-    }
-    const staleFile = await loadFileCache(cacheFile, STALE_CACHE_TTL_SECONDS);
-    if (staleFile) {
-      debugLog("zai", "stale file cache fallback");
-      return staleFile.data;
-    }
-    return null;
-  } finally {
-    pendingRequests5.delete(cacheKey);
-  }
-}
-async function fetchFromZaiApi(baseUrl, authToken) {
-  try {
-    debugLog("zai", "fetchFromZaiApi: starting...");
-    const url = `${baseUrl}/api/monitor/usage/quota/limit`;
-    const response = await fetch(url, {
-      method: "GET",
-      headers: {
-        "Accept": "application/json",
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${authToken}`
-      },
-      signal: AbortSignal.timeout(API_TIMEOUT_MS4)
-    });
-    debugLog("zai", "fetchFromZaiApi: response status", response.status);
-    if (!response.ok) {
-      debugLog("zai", "fetchFromZaiApi: response not ok");
-      return null;
-    }
-    let data;
-    try {
-      data = await response.json();
-    } catch {
-      debugLog("zai", "fetchFromZaiApi: invalid JSON response");
-      return null;
-    }
-    if (!data || typeof data !== "object") {
-      debugLog("zai", "fetchFromZaiApi: invalid response - not an object");
-      return null;
-    }
-    const typedData = data;
-    const limits = typedData.data?.limits;
-    if (!limits || !Array.isArray(limits)) {
-      debugLog("zai", "fetchFromZaiApi: no limits array");
-      return null;
-    }
-    debugLog("zai", `fetchFromZaiApi: got ${limits.length} limits`);
-    let tokensPercent = null;
-    let tokensResetAt = null;
-    let mcpPercent = null;
-    let mcpResetAt = null;
-    for (const limit of limits) {
-      const resetTime = limit.nextResetTime;
-      if (limit.type === "TOKENS_LIMIT") {
-        tokensPercent = parseUsagePercent(limit);
-        if (resetTime !== void 0) {
-          tokensResetAt = resetTime;
-        }
-      } else if (limit.type === "TIME_LIMIT") {
-        mcpPercent = parseUsagePercent(limit);
-        if (resetTime !== void 0) {
-          mcpResetAt = resetTime;
-        }
-      }
-    }
-    const result = {
-      model: "GLM",
-      tokensPercent,
-      tokensResetAt,
-      mcpPercent,
-      mcpResetAt
-    };
-    debugLog("zai", "fetchFromZaiApi: success", result);
-    return result;
-  } catch (err) {
-    debugLog("zai", "fetchFromZaiApi: error", err);
-    return null;
-  }
-}
-
 // scripts/widgets/zai-usage.ts
 function formatPercent(percent) {
   const color = getColorForPercent(percent);
@@ -3277,7 +3312,7 @@ var zaiUsageWidget = {
     if (!installed) {
       return null;
     }
-    const limits = await fetchZaiUsage(ctx.config.cache.ttlSeconds);
+    const limits = await fetchZaiUsage(ctx.config.cache.ttlSeconds, { cacheOnly: ctx.fast });
     debugLog("zai", "fetchZaiUsage result:", limits);
     const modelName = ctx.stdin.model?.display_name || "GLM";
     if (!limits) {
@@ -4067,9 +4102,53 @@ async function formatOutput(ctx) {
   return lines.join("\n");
 }
 
+// scripts/utils/background-refresh.ts
+import { spawn } from "child_process";
+import { mkdirSync, statSync, writeFileSync } from "fs";
+var REFRESH_MIN_INTERVAL_MS = 3e4;
+var REFRESH_LOCK_FILE = fileCachePath("refresh-lock.json");
+function shouldSpawnRefresh(now = Date.now(), lockFilePath = REFRESH_LOCK_FILE) {
+  try {
+    const stat11 = statSync(lockFilePath);
+    return now - stat11.mtimeMs >= REFRESH_MIN_INTERVAL_MS;
+  } catch {
+    return true;
+  }
+}
+function maybeSpawnRefresh(entryPath) {
+  if (!entryPath)
+    return;
+  try {
+    if (!shouldSpawnRefresh()) {
+      debugLog("background-refresh", "throttled, skipping spawn");
+      return;
+    }
+  } catch (err) {
+    debugLog("background-refresh", "throttle check failed, skipping spawn", err);
+    return;
+  }
+  try {
+    mkdirSync(FILE_CACHE_DIR, { recursive: true, mode: 448 });
+    writeFileSync(REFRESH_LOCK_FILE, JSON.stringify({ timestamp: Date.now() }), { mode: 384 });
+  } catch (err) {
+    debugLog("background-refresh", "lock write failed (best-effort, continuing)", err);
+  }
+  try {
+    const child = spawn(process.execPath, [entryPath, "--refresh"], {
+      detached: true,
+      stdio: "ignore",
+      env: { ...process.env }
+    });
+    child.unref();
+    debugLog("background-refresh", "spawned detached refresh process");
+  } catch (err) {
+    debugLog("background-refresh", "spawn failed (best-effort, ignored)", err);
+  }
+}
+
 // scripts/statusline.ts
 var CONFIG_PATH = join6(homedir6(), ".claude", "claude-dashboard.local.json");
-var USAGE_FETCH_DEADLINE_MS = 1500;
+var isRefresh = process.argv.includes("--refresh");
 var configCache = null;
 async function readStdin() {
   try {
@@ -4141,9 +4220,9 @@ async function main() {
   if (!usesAnthropicRateLimits()) {
     rateLimits = null;
   } else if (!stdinLimits) {
-    rateLimits = await fetchUsageLimits(config.cache.ttlSeconds, { deadlineMs: USAGE_FETCH_DEADLINE_MS });
+    rateLimits = await fetchUsageLimits(config.cache.ttlSeconds, { cacheOnly: true });
   } else if (config.plan === "max") {
-    const apiLimits = await fetchUsageLimits(config.cache.ttlSeconds, { deadlineMs: USAGE_FETCH_DEADLINE_MS });
+    const apiLimits = await fetchUsageLimits(config.cache.ttlSeconds, { cacheOnly: true });
     rateLimits = { ...stdinLimits, seven_day_sonnet: apiLimits?.seven_day_sonnet ?? null };
   } else {
     rateLimits = stdinLimits;
@@ -4152,11 +4231,42 @@ async function main() {
     stdin,
     config,
     translations,
-    rateLimits
+    rateLimits,
+    fast: true
   };
   const output = await formatOutput(ctx);
   console.log(output);
+  maybeSpawnRefresh(process.argv[1]);
 }
-main().catch(() => {
-  console.log(colorize(ICON.warning, COLORS.yellow));
-});
+async function runRefresh() {
+  try {
+    const config = await loadConfig();
+    const tasks = [];
+    if (usesAnthropicRateLimits()) {
+      tasks.push(fetchUsageLimits(config.cache.ttlSeconds));
+    }
+    if (await isCodexInstalled()) {
+      tasks.push(getCodexModel());
+      tasks.push(fetchCodexUsage(config.cache.ttlSeconds));
+    }
+    if (isZaiInstalled()) {
+      tasks.push(fetchZaiUsage(config.cache.ttlSeconds));
+    }
+    if (await isGeminiInstalled()) {
+      tasks.push(fetchGeminiUsage(config.cache.ttlSeconds));
+    }
+    await Promise.allSettled(tasks);
+    debugLog("statusline", "background refresh completed");
+  } catch (err) {
+    debugLog("statusline", "background refresh failed", err);
+  } finally {
+    process.exit(0);
+  }
+}
+if (isRefresh) {
+  runRefresh();
+} else {
+  main().catch(() => {
+    console.log(colorize(ICON.warning, COLORS.yellow));
+  });
+}

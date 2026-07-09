@@ -32,7 +32,7 @@ export const zaiUsageWidget: Widget<ZaiUsageData> = {
       return null;
     }
 
-    const limits = await fetchZaiUsage(ctx.config.cache.ttlSeconds);
+    const limits = await fetchZaiUsage(ctx.config.cache.ttlSeconds, { cacheOnly: ctx.fast });
     debugLog('zai', 'fetchZaiUsage result:', limits);
     // Get model name from stdin (prefer display_name, fallback to 'GLM')
     const modelName = ctx.stdin.model?.display_name || 'GLM';

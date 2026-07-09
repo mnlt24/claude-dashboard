@@ -202,6 +202,34 @@ let modelDetectionFailedAt: number | null = null;
 const MODEL_DETECTION_BACKOFF_MS = 300_000; // 5 minutes
 
 /**
+ * In-flight dedup for `detectModelFromCodexExec()`, mirroring the
+ * `pendingRequests` convention used elsewhere in this module (@handbook 4.2).
+ *
+ * `runRefresh()` in statusline.ts fires `getCodexModel()` and
+ * `fetchCodexUsage()` concurrently; on a cold model cache, both can reach
+ * step 3 (`codex exec`, ~8s) at the same time — `fetchCodexUsage()` calls
+ * `getCodexModel()` again internally after a successful API response. Without
+ * this guard, that's two concurrent `codex exec` subprocess spawns for a
+ * single refresh cycle.
+ */
+let pendingModelDetection: Promise<string | null> | null = null;
+
+/**
+ * Deduped wrapper around `detectModelFromCodexExec()`: concurrent callers
+ * share a single in-flight subprocess instead of each spawning their own.
+ */
+function detectModelFromCodexExecDeduped(): Promise<string | null> {
+  if (pendingModelDetection) {
+    debugLog('codex', 'detectModelFromCodexExecDeduped: reusing in-flight detection');
+    return pendingModelDetection;
+  }
+  pendingModelDetection = detectModelFromCodexExec().finally(() => {
+    pendingModelDetection = null;
+  });
+  return pendingModelDetection;
+}
+
+/**
  * Detect model by running codex exec and parsing output header.
  * Uses async execFile to avoid blocking the event loop.
  */
@@ -245,8 +273,12 @@ async function detectModelFromCodexExec(): Promise<string | null> {
 /**
  * Get current Codex model
  * Priority: config.toml > cached detection > live detection via codex exec
+ *
+ * @param opts.cacheOnly - When true, skip `detectModelFromCodexExec()` (spawns
+ *   `codex exec`, ~8s) after config.toml + cached detection both miss. Used by
+ *   hot-path render callers; returns null instead of blocking on the subprocess.
  */
-export async function getCodexModel(): Promise<string | null> {
+export async function getCodexModel(opts?: { cacheOnly?: boolean }): Promise<string | null> {
   // 1. Try config.toml first (explicit user setting)
   const configModel = await getModelFromConfig();
   if (configModel) {
@@ -261,8 +293,13 @@ export async function getCodexModel(): Promise<string | null> {
     return cachedModel;
   }
 
-  // 3. Detect via codex exec and cache
-  const detectedModel = await detectModelFromCodexExec();
+  if (opts?.cacheOnly) {
+    debugLog('codex', 'getCodexModel: cacheOnly, skipping codex exec detection');
+    return null;
+  }
+
+  // 3. Detect via codex exec and cache (deduped: concurrent callers share one subprocess)
+  const detectedModel = await detectModelFromCodexExecDeduped();
   if (detectedModel) {
     await saveModelCache(detectedModel, configMtime);
     return detectedModel;
@@ -273,8 +310,18 @@ export async function getCodexModel(): Promise<string | null> {
 
 /**
  * Fetch Codex usage limits
+ *
+ * @param opts.cacheOnly - When true, never touch the network (chatgpt-backend
+ *   fetch, which itself can call `getCodexModel()` in full/exec-detecting
+ *   mode). Reads memory/file cache (fresh or stale, within
+ *   `STALE_CACHE_TTL_SECONDS`) only, returning null on a miss. Used by
+ *   hot-path render callers; a detached background refresh process is
+ *   responsible for warming the cache instead.
  */
-export async function fetchCodexUsage(ttlSeconds: number = 60): Promise<CodexUsageLimits | null> {
+export async function fetchCodexUsage(
+  ttlSeconds: number = 60,
+  opts?: { cacheOnly?: boolean }
+): Promise<CodexUsageLimits | null> {
   const auth = await getCodexAuth();
   if (!auth) {
     return null;
@@ -303,6 +350,12 @@ export async function fetchCodexUsage(ttlSeconds: number = 60): Promise<CodexUsa
     debugLog('codex', 'file cache hit');
     codexCacheMap.set(tokenHash, { data: fromFile.data, timestamp: fromFile.timestamp });
     return fromFile.data;
+  }
+
+  if (opts?.cacheOnly) {
+    debugLog('codex', 'cacheOnly: no fresh cache, checking stale fallback');
+    const staleFile = await loadFileCache<CodexUsageLimits>(cacheFile, STALE_CACHE_TTL_SECONDS);
+    return staleFile?.data ?? null;
   }
 
   // Check pending request
@@ -428,4 +481,5 @@ export function clearCodexCache(): void {
   codexCacheMap.clear();
   cachedAuth = null;
   modelDetectionFailedAt = null;
+  pendingModelDetection = null;
 }

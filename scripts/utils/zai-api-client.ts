@@ -128,8 +128,18 @@ function getZaiAuthToken(): string | null {
 
 /**
  * Fetch z.ai usage limits
+ *
+ * @param opts.cacheOnly - When true, never touch the network (z.ai quota API,
+ *   `AbortSignal.timeout(API_TIMEOUT_MS)` = 5s). Reads memory/file cache
+ *   (fresh, then stale within `STALE_CACHE_TTL_SECONDS`) only, returning null
+ *   on a miss. Used by hot-path render callers; a detached background refresh
+ *   process (see `background-refresh.ts`) is responsible for warming the
+ *   cache instead.
  */
-export async function fetchZaiUsage(ttlSeconds: number = 60): Promise<ZaiUsageLimits | null> {
+export async function fetchZaiUsage(
+  ttlSeconds: number = 60,
+  opts?: { cacheOnly?: boolean }
+): Promise<ZaiUsageLimits | null> {
   if (!isZaiProvider()) {
     debugLog('zai', 'fetchZaiUsage: not a z.ai provider');
     return null;
@@ -169,6 +179,12 @@ export async function fetchZaiUsage(ttlSeconds: number = 60): Promise<ZaiUsageLi
     debugLog('zai', 'file cache hit');
     zaiCacheMap.set(cacheKey, { data: fromFile.data, timestamp: fromFile.timestamp });
     return fromFile.data;
+  }
+
+  if (opts?.cacheOnly) {
+    debugLog('zai', 'cacheOnly: no fresh cache, checking stale fallback');
+    const staleFile = await loadFileCache<ZaiUsageLimits>(cacheFile, STALE_CACHE_TTL_SECONDS);
+    return staleFile?.data ?? null;
   }
 
   // Check pending request
