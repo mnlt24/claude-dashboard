@@ -481,4 +481,132 @@ describe('api-client', () => {
       expect(filesAfter).not.toContain('cache-cleanup-test-old.json');
     });
   });
+
+  describe('fetchUsageLimits deadline (stale-while-revalidate)', () => {
+    it('should behave exactly like the pre-deadline implementation when deadlineMs is omitted', async () => {
+      const testToken = 'deadline-omitted-token';
+      const { getCredentials } = await import('../utils/credentials.js');
+      vi.mocked(getCredentials).mockResolvedValue(testToken);
+      await deleteFileCacheForToken(testToken);
+
+      const mockLimits = {
+        five_hour: { utilization: 0.2, resets_at: '2024-01-01T00:00:00Z' },
+        seven_day: null,
+        seven_day_sonnet: null,
+      };
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockLimits),
+      });
+      global.fetch = fetchMock;
+
+      const { fetchUsageLimits, clearCache } = await import('../utils/api-client.js');
+      clearCache();
+
+      // No opts arg at all — same call shape as check-usage.ts
+      const result = await fetchUsageLimits(300);
+
+      expect(result).not.toBeNull();
+      expect(result?.five_hour?.utilization).toBe(0.2);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      await deleteFileCacheForToken(testToken);
+    });
+
+    it('should return the fresh value when inner resolves before the deadline', async () => {
+      const testToken = 'deadline-fresh-token';
+      const { getCredentials } = await import('../utils/credentials.js');
+      vi.mocked(getCredentials).mockResolvedValue(testToken);
+      await deleteFileCacheForToken(testToken);
+
+      const mockLimits = {
+        five_hour: { utilization: 0.15, resets_at: '2024-01-01T00:00:00Z' },
+        seven_day: null,
+        seven_day_sonnet: null,
+      };
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockLimits),
+      });
+      global.fetch = fetchMock;
+
+      const { fetchUsageLimits, clearCache } = await import('../utils/api-client.js');
+      clearCache();
+
+      // Deadline is generous (5s) — the fast mock resolves well within it.
+      const result = await fetchUsageLimits(300, { deadlineMs: 5000 });
+
+      expect(result).not.toBeNull();
+      expect(result?.five_hour?.utilization).toBe(0.15);
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      await deleteFileCacheForToken(testToken);
+    });
+
+    it('should serve stale file cache once the deadline elapses while inner is still pending', async () => {
+      const testToken = 'deadline-stale-token';
+      const tokenHash = hashToken(testToken);
+
+      const { getCredentials } = await import('../utils/credentials.js');
+      vi.mocked(getCredentials).mockResolvedValue(testToken);
+
+      // Stale file cache: too old for the 300s TTL, still within STALE_FALLBACK_SECONDS (3600s).
+      const staleLimits = {
+        five_hour: { utilization: 0.55, resets_at: '2024-01-01T00:00:00Z' },
+        seven_day: null,
+        seven_day_sonnet: null,
+      };
+      await mkdir(ACTUAL_CACHE_DIR, { recursive: true, mode: 0o700 });
+      await writeFile(
+        path.join(ACTUAL_CACHE_DIR, `cache-${tokenHash}.json`),
+        JSON.stringify({ data: staleLimits, timestamp: Date.now() - 600_000 }),
+        { mode: 0o600 }
+      );
+
+      // fetch() never settles within the test — simulates a hung/slow network call
+      // (the ~11s worst case this feature is meant to protect against).
+      global.fetch = vi.fn(() => new Promise(() => {}));
+
+      const { fetchUsageLimits, clearCache } = await import('../utils/api-client.js');
+      clearCache();
+
+      vi.useFakeTimers();
+      try {
+        const resultPromise = fetchUsageLimits(300, { deadlineMs: 100 });
+        // Fire the deadline timer without waiting real wall-clock time.
+        await vi.advanceTimersByTimeAsync(100);
+        const result = await resultPromise;
+
+        expect(result).not.toBeNull();
+        expect(result?.five_hour?.utilization).toBe(0.55);
+      } finally {
+        vi.useRealTimers();
+      }
+
+      await deleteFileCacheForToken(testToken);
+    });
+
+    it('should return null (not hang) when inner never resolves and no stale cache exists', async () => {
+      const testToken = 'deadline-null-token';
+      const { getCredentials } = await import('../utils/credentials.js');
+      vi.mocked(getCredentials).mockResolvedValue(testToken);
+      await deleteFileCacheForToken(testToken);
+
+      global.fetch = vi.fn(() => new Promise(() => {}));
+
+      const { fetchUsageLimits, clearCache } = await import('../utils/api-client.js');
+      clearCache();
+
+      vi.useFakeTimers();
+      try {
+        const resultPromise = fetchUsageLimits(300, { deadlineMs: 100 });
+        await vi.advanceTimersByTimeAsync(100);
+        const result = await resultPromise;
+
+        expect(result).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
 });

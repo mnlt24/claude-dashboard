@@ -194,7 +194,7 @@ function isCacheValid(tokenHash, ttlSeconds) {
   const effectiveTtl = cache.isError ? NEGATIVE_CACHE_SECONDS : ttlSeconds;
   return ageSeconds < effectiveTtl;
 }
-async function fetchUsageLimits(ttlSeconds = 300) {
+async function fetchUsageLimitsInner(ttlSeconds = 300) {
   const token = await getCredentials();
   if (!token) {
     if (lastTokenHash) {
@@ -249,6 +249,33 @@ async function fetchUsageLimits(ttlSeconds = 300) {
     return null;
   } finally {
     pendingRequests.delete(tokenHash);
+  }
+}
+async function staleAfterDeadline() {
+  if (!lastTokenHash)
+    return null;
+  return loadFileCache2(lastTokenHash, STALE_FALLBACK_SECONDS);
+}
+async function fetchUsageLimits(ttlSeconds = 300, opts) {
+  const inner = fetchUsageLimitsInner(ttlSeconds);
+  const deadlineMs = opts?.deadlineMs;
+  if (!deadlineMs)
+    return inner;
+  inner.catch(() => {
+  });
+  let timer;
+  const deadline = new Promise((resolve) => {
+    timer = setTimeout(() => {
+      debugLog("api", `usage fetch exceeded ${deadlineMs}ms deadline; serving stale`);
+      resolve(staleAfterDeadline());
+    }, deadlineMs);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([inner, deadline]);
+  } finally {
+    if (timer)
+      clearTimeout(timer);
   }
 }
 async function makeRequest(token) {

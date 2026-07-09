@@ -17,10 +17,19 @@ import { DEFAULT_CONFIG, parsePreset } from './types.js';
 import { COLORS, colorize, setTheme, setSeparatorStyle } from './utils/colors.js';
 import { ICON } from './utils/emoji.js';
 import { fetchUsageLimits } from './utils/api-client.js';
+import { usesAnthropicRateLimits } from './utils/provider.js';
 import { getTranslations } from './utils/i18n.js';
 import { formatOutput } from './widgets/index.js';
 
 const CONFIG_PATH = join(homedir(), '.claude', 'claude-dashboard.local.json');
+
+/**
+ * statusline은 매 렌더마다 실행되는 hot path. cold 캐시일 때 fetchUsageLimits()가
+ * fetch 타임아웃(5s) + curl 폴백(5s)까지 최대 ~11초 동기 대기해 상태줄 렌더를 막을 수 있다.
+ * 이 데드라인을 넘기면 stale 파일 캐시(있으면)로 즉시 폴백해 렌더를 블로킹하지 않는다.
+ * 원본 fetch는 백그라운드에서 계속 완료돼 다음 렌더를 위해 파일 캐시를 데운다.
+ */
+const USAGE_FETCH_DEADLINE_MS = 1500;
 
 /**
  * Cached config with mtime-based invalidation
@@ -136,12 +145,16 @@ async function main(): Promise<void> {
   const stdinLimits = parseStdinRateLimits(stdin);
   let rateLimits: UsageLimits | null;
 
-  if (!stdinLimits) {
+  if (!usesAnthropicRateLimits()) {
+    // Bedrock/Vertex/z.ai: Anthropic 구독 usage 없음 → 키체인+네트워크 호출 자체를 스킵.
+    // rate-limit 위젯은 어차피 숨겨지므로 표시 결과 불변.
+    rateLimits = null;
+  } else if (!stdinLimits) {
     // Stdin rate_limits not yet available — full API fallback
-    rateLimits = await fetchUsageLimits(config.cache.ttlSeconds);
+    rateLimits = await fetchUsageLimits(config.cache.ttlSeconds, { deadlineMs: USAGE_FETCH_DEADLINE_MS });
   } else if (config.plan === 'max') {
     // Hybrid: stdin for 5h/7d, API only for seven_day_sonnet
-    const apiLimits = await fetchUsageLimits(config.cache.ttlSeconds);
+    const apiLimits = await fetchUsageLimits(config.cache.ttlSeconds, { deadlineMs: USAGE_FETCH_DEADLINE_MS });
     rateLimits = { ...stdinLimits, seven_day_sonnet: apiLimits?.seven_day_sonnet ?? null };
   } else {
     rateLimits = stdinLimits;

@@ -63,12 +63,12 @@ function isCacheValid(tokenHash: string, ttlSeconds: number): boolean {
 }
 
 /**
- * Fetch usage limits from Anthropic API
+ * Fetch usage limits from Anthropic API (internal implementation).
  *
  * @param ttlSeconds - Cache TTL in seconds (default: 300)
  * @returns Usage limits or null if failed
  */
-export async function fetchUsageLimits(ttlSeconds: number = 300): Promise<UsageLimits | null> {
+async function fetchUsageLimitsInner(ttlSeconds: number = 300): Promise<UsageLimits | null> {
   // Get token first to determine cache key
   const token = await getCredentials();
 
@@ -140,6 +140,64 @@ export async function fetchUsageLimits(ttlSeconds: number = 300): Promise<UsageL
     return null;
   } finally {
     pendingRequests.delete(tokenHash);
+  }
+}
+
+/**
+ * Read stale file cache for the last known token hash after a deadline is
+ * exceeded. Used by `fetchUsageLimits`'s deadline race — `lastTokenHash` is
+ * set by `fetchUsageLimitsInner` as soon as `getCredentials()` resolves, so
+ * it's available even if the inner fetch hasn't finished yet.
+ */
+async function staleAfterDeadline(): Promise<UsageLimits | null> {
+  if (!lastTokenHash) return null;
+  return loadFileCache(lastTokenHash, STALE_FALLBACK_SECONDS);
+}
+
+/**
+ * Fetch usage limits from Anthropic API, with an optional deadline for
+ * hot-path callers (e.g. the statusline entry point) that cannot afford to
+ * block on a cold-cache fetch (up to ~11s: fetch timeout + curl fallback).
+ *
+ * Without `opts.deadlineMs`, behavior is identical to the pre-deadline
+ * implementation (full await, no race) — existing callers like
+ * `check-usage.ts` are unaffected.
+ *
+ * With `opts.deadlineMs`, the underlying fetch keeps running in the
+ * background even if the deadline wins the race, so it still warms the file
+ * cache (stale-while-revalidate) for the next render.
+ *
+ * @param ttlSeconds - Cache TTL in seconds (default: 300)
+ * @param opts.deadlineMs - Optional max wait before falling back to stale cache
+ * @returns Usage limits, stale cache fallback, or null
+ */
+export async function fetchUsageLimits(
+  ttlSeconds: number = 300,
+  opts?: { deadlineMs?: number }
+): Promise<UsageLimits | null> {
+  const inner = fetchUsageLimitsInner(ttlSeconds);
+  const deadlineMs = opts?.deadlineMs;
+  if (!deadlineMs) return inner;
+
+  // Background completion keeps warming the file cache (stale-while-revalidate)
+  // even after the deadline wins the race below. Swallow here so an unresolved
+  // rejection never surfaces as an unhandled rejection (fetchUsageLimitsInner
+  // already catches its own errors internally, so this is a safety net only).
+  inner.catch(() => {});
+
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<UsageLimits | null>((resolve) => {
+    timer = setTimeout(() => {
+      debugLog('api', `usage fetch exceeded ${deadlineMs}ms deadline; serving stale`);
+      resolve(staleAfterDeadline());
+    }, deadlineMs);
+    timer.unref?.(); // Don't let the deadline timer keep the process alive
+  });
+
+  try {
+    return await Promise.race([inner, deadline]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 

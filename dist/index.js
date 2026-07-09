@@ -677,7 +677,7 @@ function isCacheValid(tokenHash, ttlSeconds) {
   const effectiveTtl = cache.isError ? NEGATIVE_CACHE_SECONDS : ttlSeconds;
   return ageSeconds < effectiveTtl;
 }
-async function fetchUsageLimits(ttlSeconds = 300) {
+async function fetchUsageLimitsInner(ttlSeconds = 300) {
   const token = await getCredentials();
   if (!token) {
     if (lastTokenHash) {
@@ -732,6 +732,33 @@ async function fetchUsageLimits(ttlSeconds = 300) {
     return null;
   } finally {
     pendingRequests.delete(tokenHash);
+  }
+}
+async function staleAfterDeadline() {
+  if (!lastTokenHash)
+    return null;
+  return loadFileCache2(lastTokenHash, STALE_FALLBACK_SECONDS);
+}
+async function fetchUsageLimits(ttlSeconds = 300, opts) {
+  const inner = fetchUsageLimitsInner(ttlSeconds);
+  const deadlineMs = opts?.deadlineMs;
+  if (!deadlineMs)
+    return inner;
+  inner.catch(() => {
+  });
+  let timer;
+  const deadline = new Promise((resolve) => {
+    timer = setTimeout(() => {
+      debugLog("api", `usage fetch exceeded ${deadlineMs}ms deadline; serving stale`);
+      resolve(staleAfterDeadline());
+    }, deadlineMs);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([inner, deadline]);
+  } finally {
+    if (timer)
+      clearTimeout(timer);
   }
 }
 async function makeRequest(token) {
@@ -861,6 +888,46 @@ async function loadFileCache2(tokenHash, ttlSeconds) {
 }
 async function saveFileCache2(tokenHash, data) {
   await saveFileCache(getCacheFilePath(tokenHash), data);
+}
+
+// scripts/utils/provider.ts
+function isTruthyFlag(v) {
+  return v === "1" || v?.toLowerCase() === "true";
+}
+function detectProvider() {
+  if (isTruthyFlag(process.env.CLAUDE_CODE_USE_BEDROCK) || isTruthyFlag(process.env.CLAUDE_CODE_USE_MANTLE)) {
+    return "bedrock";
+  }
+  if (isTruthyFlag(process.env.CLAUDE_CODE_USE_VERTEX)) {
+    return "vertex";
+  }
+  const baseUrl = process.env.ANTHROPIC_BASE_URL || "";
+  if (baseUrl.includes("api.z.ai")) {
+    return "zai";
+  }
+  if (baseUrl.includes("bigmodel.cn")) {
+    return "zhipu";
+  }
+  return "anthropic";
+}
+function isZaiProvider() {
+  const provider = detectProvider();
+  return provider === "zai" || provider === "zhipu";
+}
+function usesAnthropicRateLimits() {
+  return detectProvider() === "anthropic";
+}
+function getZaiApiBaseUrl() {
+  const baseUrl = process.env.ANTHROPIC_BASE_URL;
+  if (!baseUrl) {
+    return null;
+  }
+  try {
+    const url = new URL(baseUrl);
+    return url.origin;
+  } catch {
+    return null;
+  }
 }
 
 // locales/en.json
@@ -1083,46 +1150,6 @@ function clampPercent(value) {
 }
 function osc8Link(url, text) {
   return `\x1B]8;;${url}\x1B\\${text}\x1B]8;;\x1B\\`;
-}
-
-// scripts/utils/provider.ts
-function isTruthyFlag(v) {
-  return v === "1" || v?.toLowerCase() === "true";
-}
-function detectProvider() {
-  if (isTruthyFlag(process.env.CLAUDE_CODE_USE_BEDROCK) || isTruthyFlag(process.env.CLAUDE_CODE_USE_MANTLE)) {
-    return "bedrock";
-  }
-  if (isTruthyFlag(process.env.CLAUDE_CODE_USE_VERTEX)) {
-    return "vertex";
-  }
-  const baseUrl = process.env.ANTHROPIC_BASE_URL || "";
-  if (baseUrl.includes("api.z.ai")) {
-    return "zai";
-  }
-  if (baseUrl.includes("bigmodel.cn")) {
-    return "zhipu";
-  }
-  return "anthropic";
-}
-function isZaiProvider() {
-  const provider = detectProvider();
-  return provider === "zai" || provider === "zhipu";
-}
-function usesAnthropicRateLimits() {
-  return detectProvider() === "anthropic";
-}
-function getZaiApiBaseUrl() {
-  const baseUrl = process.env.ANTHROPIC_BASE_URL;
-  if (!baseUrl) {
-    return null;
-  }
-  try {
-    const url = new URL(baseUrl);
-    return url.origin;
-  } catch {
-    return null;
-  }
 }
 
 // scripts/widgets/model.ts
@@ -4042,6 +4069,7 @@ async function formatOutput(ctx) {
 
 // scripts/statusline.ts
 var CONFIG_PATH = join6(homedir6(), ".claude", "claude-dashboard.local.json");
+var USAGE_FETCH_DEADLINE_MS = 1500;
 var configCache = null;
 async function readStdin() {
   try {
@@ -4110,10 +4138,12 @@ async function main() {
   }
   const stdinLimits = parseStdinRateLimits(stdin);
   let rateLimits;
-  if (!stdinLimits) {
-    rateLimits = await fetchUsageLimits(config.cache.ttlSeconds);
+  if (!usesAnthropicRateLimits()) {
+    rateLimits = null;
+  } else if (!stdinLimits) {
+    rateLimits = await fetchUsageLimits(config.cache.ttlSeconds, { deadlineMs: USAGE_FETCH_DEADLINE_MS });
   } else if (config.plan === "max") {
-    const apiLimits = await fetchUsageLimits(config.cache.ttlSeconds);
+    const apiLimits = await fetchUsageLimits(config.cache.ttlSeconds, { deadlineMs: USAGE_FETCH_DEADLINE_MS });
     rateLimits = { ...stdinLimits, seven_day_sonnet: apiLimits?.seven_day_sonnet ?? null };
   } else {
     rateLimits = stdinLimits;
