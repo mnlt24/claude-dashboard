@@ -7,6 +7,7 @@ import {
   rateLimit5hWidget,
   rateLimit7dWidget,
   rateLimit7dSonnetWidget,
+  rateLimit7dFableWidget,
 } from '../widgets/rate-limit.js';
 import type { WidgetContext, UsageLimits, Config } from '../types.js';
 import { ICON } from '../utils/emoji.js';
@@ -46,6 +47,7 @@ describe('rate-limit widgets', () => {
         five_hour: null,
         seven_day: null,
         seven_day_sonnet: null,
+        seven_day_fable: null,
       });
       const data = await rateLimit5hWidget.getData(ctx);
 
@@ -58,6 +60,7 @@ describe('rate-limit widgets', () => {
         five_hour: { utilization: 45.7, resets_at: '2024-01-01T12:00:00Z' },
         seven_day: null,
         seven_day_sonnet: null,
+        seven_day_fable: null,
       });
       const data = await rateLimit5hWidget.getData(ctx);
 
@@ -97,7 +100,7 @@ describe('rate-limit widgets', () => {
   describe('rateLimit7dWidget', () => {
     it('should return data for pro plan when seven_day is available', async () => {
       const ctx = createContext(
-        { five_hour: null, seven_day: { utilization: 50, resets_at: null }, seven_day_sonnet: null },
+        { five_hour: null, seven_day: { utilization: 50, resets_at: null }, seven_day_sonnet: null, seven_day_fable: null },
         { plan: 'pro' }
       );
       const data = await rateLimit7dWidget.getData(ctx);
@@ -115,7 +118,7 @@ describe('rate-limit widgets', () => {
 
     it('should return data for max plan when seven_day is available', async () => {
       const ctx = createContext(
-        { five_hour: null, seven_day: { utilization: 30, resets_at: null }, seven_day_sonnet: null },
+        { five_hour: null, seven_day: { utilization: 30, resets_at: null }, seven_day_sonnet: null, seven_day_fable: null },
         { plan: 'max' }
       );
       const data = await rateLimit7dWidget.getData(ctx);
@@ -137,7 +140,7 @@ describe('rate-limit widgets', () => {
   describe('rateLimit7dSonnetWidget', () => {
     it('should return null for non-max plan', async () => {
       const ctx = createContext(
-        { five_hour: null, seven_day: null, seven_day_sonnet: { utilization: 25, resets_at: null } },
+        { five_hour: null, seven_day: null, seven_day_sonnet: { utilization: 25, resets_at: null }, seven_day_fable: null },
         { plan: 'pro' }
       );
       const data = await rateLimit7dSonnetWidget.getData(ctx);
@@ -147,7 +150,7 @@ describe('rate-limit widgets', () => {
 
     it('should return data for max plan when seven_day_sonnet is available', async () => {
       const ctx = createContext(
-        { five_hour: null, seven_day: null, seven_day_sonnet: { utilization: 25, resets_at: null } },
+        { five_hour: null, seven_day: null, seven_day_sonnet: { utilization: 25, resets_at: null }, seven_day_fable: null },
         { plan: 'max' }
       );
       const data = await rateLimit7dSonnetWidget.getData(ctx);
@@ -163,6 +166,48 @@ describe('rate-limit widgets', () => {
 
       expect(result).toContain('7d-S');
       expect(result).toContain('60%');
+    });
+  });
+
+  describe('rateLimit7dFableWidget', () => {
+    it('should return null for non-max plan', async () => {
+      const ctx = createContext(
+        { five_hour: null, seven_day: null, seven_day_sonnet: null, seven_day_fable: { utilization: 28, resets_at: null } },
+        { plan: 'pro' }
+      );
+      const data = await rateLimit7dFableWidget.getData(ctx);
+
+      expect(data).toBeNull();
+    });
+
+    it('should return data for max plan when seven_day_fable is available', async () => {
+      const ctx = createContext(
+        { five_hour: null, seven_day: null, seven_day_sonnet: null, seven_day_fable: { utilization: 28, resets_at: null } },
+        { plan: 'max' }
+      );
+      const data = await rateLimit7dFableWidget.getData(ctx);
+
+      expect(data).not.toBeNull();
+      expect(data?.utilization).toBe(28);
+    });
+
+    it('should return null for max plan when seven_day_fable is unavailable', async () => {
+      const ctx = createContext(
+        { five_hour: null, seven_day: null, seven_day_sonnet: null, seven_day_fable: null },
+        { plan: 'max' }
+      );
+      const data = await rateLimit7dFableWidget.getData(ctx);
+
+      expect(data).toBeNull();
+    });
+
+    it('should render 7df label', () => {
+      const ctx = createContext(null, { plan: 'max' });
+      const data = { utilization: 42, resetsAt: null };
+      const result = rateLimit7dFableWidget.render(data, ctx);
+
+      expect(result).toContain('7df');
+      expect(result).toContain('42%');
     });
   });
 });

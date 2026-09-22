@@ -16,7 +16,7 @@ import { ICON } from '../utils/emoji.js';
 import { formatTimeRemaining } from '../utils/formatters.js';
 import { usesAnthropicRateLimits } from '../utils/provider.js';
 
-type LabelKey = '5h' | '7d_all' | '7d_sonnet';
+type LabelKey = '5h' | '7d_all' | '7d_sonnet' | '7d_fable';
 type LimitKey = keyof UsageLimits;
 
 function renderRateLimit(data: RateLimitData, ctx: WidgetContext, labelKey: LabelKey): string {
@@ -101,5 +101,24 @@ export const rateLimit7dSonnetWidget: Widget<RateLimitData> = {
 
   render(data: RateLimitData, ctx: WidgetContext): string {
     return renderRateLimit(data, ctx, '7d_sonnet');
+  },
+};
+
+/**
+ * 7-day Fable-only rate limit widget (Max plan only) — API `limits[]`
+ * weekly_scoped 버킷 기반
+ */
+export const rateLimit7dFableWidget: Widget<RateLimitData> = {
+  id: 'rateLimit7dFable',
+  name: '7d Fable Rate Limit',
+
+  async getData(ctx: WidgetContext): Promise<RateLimitData | null> {
+    if (shouldHideAnthropicLimits()) return null;
+    if (ctx.config.plan !== 'max') return null;
+    return getLimitData(ctx.rateLimits, 'seven_day_fable');
+  },
+
+  render(data: RateLimitData, ctx: WidgetContext): string {
+    return renderRateLimit(data, ctx, '7d_fable');
   },
 };

@@ -8,14 +8,14 @@ import { homedir as homedir6 } from "os";
 // scripts/types.ts
 var DISPLAY_PRESETS = {
   compact: [
-    ["model", "context", "cost", "rateLimit5h", "rateLimit7d", "rateLimit7dSonnet", "zaiUsage"]
+    ["model", "context", "cost", "rateLimit5h", "rateLimit7d", "rateLimit7dSonnet", "rateLimit7dFable", "zaiUsage"]
   ],
   normal: [
-    ["model", "context", "cost", "rateLimit5h", "rateLimit7d", "rateLimit7dSonnet", "zaiUsage"],
+    ["model", "context", "cost", "rateLimit5h", "rateLimit7d", "rateLimit7dSonnet", "rateLimit7dFable", "zaiUsage"],
     ["projectInfo", "sessionId", "sessionDuration", "burnRate", "todoProgress"]
   ],
   detailed: [
-    ["model", "context", "cost", "rateLimit5h", "rateLimit7d", "rateLimit7dSonnet", "zaiUsage"],
+    ["model", "context", "cost", "rateLimit5h", "rateLimit7d", "rateLimit7dSonnet", "rateLimit7dFable", "zaiUsage"],
     ["projectInfo", "sessionName", "sessionId", "sessionDuration", "burnRate", "tokenSpeed", "depletionTime", "todoProgress"],
     ["configCounts", "toolActivity", "agentStatus", "cacheHit", "performance"],
     ["tokenBreakdown", "forecast", "budget", "todayCost"],
@@ -33,6 +33,7 @@ var PRESET_CHAR_MAP = {
   R: "rateLimit5h",
   "7": "rateLimit7d",
   S: "rateLimit7dSonnet",
+  f: "rateLimit7dFable",
   P: "projectInfo",
   I: "sessionId",
   D: "sessionDuration",
@@ -858,12 +859,39 @@ function validateLimitWindow(raw) {
     resets_at: typeof w.resets_at === "string" ? w.resets_at : null
   };
 }
+function extractScopedWeeklyLimit(rawLimits, modelName) {
+  if (!Array.isArray(rawLimits))
+    return null;
+  for (const entry of rawLimits) {
+    if (!entry || typeof entry !== "object")
+      continue;
+    const item = entry;
+    if (item.kind !== "weekly_scoped")
+      continue;
+    const scope = item.scope;
+    const model = scope?.model;
+    const displayName = model?.display_name;
+    if (typeof displayName !== "string")
+      continue;
+    const firstWord = displayName.trim().split(/\s+/)[0]?.toLowerCase();
+    if (firstWord !== modelName.toLowerCase())
+      continue;
+    if (typeof item.percent !== "number")
+      continue;
+    return {
+      utilization: item.percent,
+      resets_at: typeof item.resets_at === "string" ? item.resets_at : null
+    };
+  }
+  return null;
+}
 async function parseAndCacheLimits(data, tokenHash) {
   const d = data && typeof data === "object" ? data : {};
   const limits = {
     five_hour: validateLimitWindow(d.five_hour),
     seven_day: validateLimitWindow(d.seven_day),
-    seven_day_sonnet: validateLimitWindow(d.seven_day_sonnet)
+    seven_day_sonnet: validateLimitWindow(d.seven_day_sonnet),
+    seven_day_fable: extractScopedWeeklyLimit(d.limits, "fable")
   };
   usageCacheMap.set(tokenHash, { data: limits, timestamp: Date.now() });
   await saveFileCache2(tokenHash, limits);
@@ -1886,6 +1914,7 @@ var en_default = {
     "7d": "7d",
     "7d_all": "7d",
     "7d_sonnet": "7d-S",
+    "7d_fable": "7df",
     codex: "Codex",
     "1m": "1m"
   },
@@ -1945,6 +1974,7 @@ var ko_default = {
     "7d": "7\uC77C",
     "7d_all": "7\uC77C",
     "7d_sonnet": "7\uC77C-S",
+    "7d_fable": "7\uC77C-F",
     codex: "Codex",
     "1m": "1\uAC1C\uC6D4"
   },
@@ -2252,6 +2282,20 @@ var rateLimit7dSonnetWidget = {
   },
   render(data, ctx) {
     return renderRateLimit(data, ctx, "7d_sonnet");
+  }
+};
+var rateLimit7dFableWidget = {
+  id: "rateLimit7dFable",
+  name: "7d Fable Rate Limit",
+  async getData(ctx) {
+    if (shouldHideAnthropicLimits())
+      return null;
+    if (ctx.config.plan !== "max")
+      return null;
+    return getLimitData(ctx.rateLimits, "seven_day_fable");
+  },
+  render(data, ctx) {
+    return renderRateLimit(data, ctx, "7d_fable");
   }
 };
 
@@ -4022,6 +4066,7 @@ var widgetRegistry = /* @__PURE__ */ new Map([
   ["rateLimit5h", rateLimit5hWidget],
   ["rateLimit7d", rateLimit7dWidget],
   ["rateLimit7dSonnet", rateLimit7dSonnetWidget],
+  ["rateLimit7dFable", rateLimit7dFableWidget],
   ["projectInfo", projectInfoWidget],
   ["configCounts", configCountsWidget],
   ["sessionDuration", sessionDurationWidget],
@@ -4201,7 +4246,9 @@ function parseStdinRateLimits(stdin) {
   return {
     five_hour: rl.five_hour ? convertStdinLimit(rl.five_hour) : null,
     seven_day: rl.seven_day ? convertStdinLimit(rl.seven_day) : null,
-    seven_day_sonnet: null
+    seven_day_sonnet: null,
+    // Not available in stdin
+    seven_day_fable: null
     // Not available in stdin
   };
 }
@@ -4223,7 +4270,11 @@ async function main() {
     rateLimits = await fetchUsageLimits(config.cache.ttlSeconds, { cacheOnly: true });
   } else if (config.plan === "max") {
     const apiLimits = await fetchUsageLimits(config.cache.ttlSeconds, { cacheOnly: true });
-    rateLimits = { ...stdinLimits, seven_day_sonnet: apiLimits?.seven_day_sonnet ?? null };
+    rateLimits = {
+      ...stdinLimits,
+      seven_day_sonnet: apiLimits?.seven_day_sonnet ?? null,
+      seven_day_fable: apiLimits?.seven_day_fable ?? null
+    };
   } else {
     rateLimits = stdinLimits;
   }

@@ -34,7 +34,7 @@ git clone https://github.com/uppinote20/claude-dashboard.git ~/.claude/plugins/c
 
 ![Compact](images/compact.png)
 
-> Model, context progress bar, cost, rate limits (5h/7d/7d-Sonnet) or z.ai usage (mutually exclusive by provider)
+> Model, context progress bar, cost, rate limits (5h/7d/7d-Sonnet/7d-Fable) or z.ai usage (mutually exclusive by provider)
 
 **Normal (2 lines):**
 
@@ -65,6 +65,7 @@ Multi-provider support: z.ai/ZHIPU, Codex, Gemini auto-detected when installed.
 | **Rate Limits** | `rateLimit5h` | 5-hour rate limit with reset countdown |
 | | `rateLimit7d` | 7-day rate limit (Pro and Max) |
 | | `rateLimit7dSonnet` | 7-day Sonnet limit (Max only) |
+| | `rateLimit7dFable` | 7-day Fable limit (Max only) |
 | **Session** | `sessionId` | Session ID (short 8-char) |
 | | `sessionIdFull` | Session ID (full UUID) |
 | | `sessionName` | Session name from /rename command |

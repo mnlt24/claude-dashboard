@@ -26,6 +26,7 @@ claude-dashboard는 39개의 위젯을 제공합니다. 각 위젯은 독립적�
 | 5시간 제한 | `rateLimit5h` | 5시간 사용량 및 리셋 카운트다운 |
 | 7일 제한 | `rateLimit7d` | 7일 사용량 (Pro/Max) |
 | 7일 Sonnet 제한 | `rateLimit7dSonnet` | 7일 Sonnet 사용량 (Max 전용) |
+| 7일 Fable 제한 | `rateLimit7dFable` | 7일 Fable 사용량 (Max 전용) |
 
 ## Session
 

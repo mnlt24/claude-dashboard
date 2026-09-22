@@ -973,6 +973,7 @@ describe('widgets', () => {
         five_hour: { utilization: 0, resets_at: null },
         seven_day: null,
         seven_day_sonnet: null,
+        seven_day_fable: null,
       };
       const data = await depletionTimeWidget.getData(ctx);
       expect(data).toBeNull();

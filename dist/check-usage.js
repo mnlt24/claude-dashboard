@@ -375,12 +375,39 @@ function validateLimitWindow(raw) {
     resets_at: typeof w.resets_at === "string" ? w.resets_at : null
   };
 }
+function extractScopedWeeklyLimit(rawLimits, modelName) {
+  if (!Array.isArray(rawLimits))
+    return null;
+  for (const entry of rawLimits) {
+    if (!entry || typeof entry !== "object")
+      continue;
+    const item = entry;
+    if (item.kind !== "weekly_scoped")
+      continue;
+    const scope = item.scope;
+    const model = scope?.model;
+    const displayName = model?.display_name;
+    if (typeof displayName !== "string")
+      continue;
+    const firstWord = displayName.trim().split(/\s+/)[0]?.toLowerCase();
+    if (firstWord !== modelName.toLowerCase())
+      continue;
+    if (typeof item.percent !== "number")
+      continue;
+    return {
+      utilization: item.percent,
+      resets_at: typeof item.resets_at === "string" ? item.resets_at : null
+    };
+  }
+  return null;
+}
 async function parseAndCacheLimits(data, tokenHash) {
   const d = data && typeof data === "object" ? data : {};
   const limits = {
     five_hour: validateLimitWindow(d.five_hour),
     seven_day: validateLimitWindow(d.seven_day),
-    seven_day_sonnet: validateLimitWindow(d.seven_day_sonnet)
+    seven_day_sonnet: validateLimitWindow(d.seven_day_sonnet),
+    seven_day_fable: extractScopedWeeklyLimit(d.limits, "fable")
   };
   usageCacheMap.set(tokenHash, { data: limits, timestamp: Date.now() });
   await saveFileCache2(tokenHash, limits);
@@ -1734,6 +1761,7 @@ var en_default = {
     "7d": "7d",
     "7d_all": "7d",
     "7d_sonnet": "7d-S",
+    "7d_fable": "7df",
     codex: "Codex",
     "1m": "1m"
   },
@@ -1793,6 +1821,7 @@ var ko_default = {
     "7d": "7\uC77C",
     "7d_all": "7\uC77C",
     "7d_sonnet": "7\uC77C-S",
+    "7d_fable": "7\uC77C-F",
     codex: "Codex",
     "1m": "1\uAC1C\uC6D4"
   },

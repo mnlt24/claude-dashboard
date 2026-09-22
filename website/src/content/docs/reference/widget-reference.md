@@ -129,6 +129,19 @@ $0.03
 7dS: 23%
 ```
 
+### rateLimit7dFable
+
+| Property | Value |
+|----------|-------|
+| **Widget ID** | `rateLimit7dFable` |
+| **Data Source** | API (oauth/usage) |
+| **Description** | Shows the 7-day Fable-specific rate limit utilization. Max plan only. |
+
+**Example output:**
+```
+7df: 28%
+```
+
 ## Session Widgets
 
 ### sessionId

@@ -67,6 +67,7 @@ describe('parseClaudeUsage', () => {
         resets_at: '2025-01-20T00:00:00Z',
       },
       seven_day_sonnet: null,
+      seven_day_fable: null,
     };
 
     const result = parseClaudeUsage(limits);
@@ -87,6 +88,7 @@ describe('parseClaudeUsage', () => {
         resets_at: '2025-01-20T00:00:00Z',
       },
       seven_day_sonnet: null,
+      seven_day_fable: null,
     };
 
     const result = parseClaudeUsage(limits);

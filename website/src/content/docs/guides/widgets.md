@@ -26,6 +26,7 @@ claude-dashboard provides 39 widgets organized by category. Each widget can be i
 | `rateLimit5h` | 5-hour rate limit with reset countdown |
 | `rateLimit7d` | 7-day rate limit (Pro and Max) |
 | `rateLimit7dSonnet` | 7-day Sonnet limit (Max plan only) |
+| `rateLimit7dFable` | 7-day Fable limit (Max plan only) |
 
 ## Session
 

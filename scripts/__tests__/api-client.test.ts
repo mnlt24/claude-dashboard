@@ -91,6 +91,7 @@ describe('api-client', () => {
         five_hour: { utilization: 0.1, resets_at: '2024-01-01T00:00:00Z' },
         seven_day: null,
         seven_day_sonnet: null,
+        seven_day_fable: null,
       };
 
       const fetchMock = vi.fn().mockResolvedValue({
@@ -147,6 +148,138 @@ describe('api-client', () => {
     });
   });
 
+  // Fable 7일 한도는 평면 키(seven_day_opus/sonnet)가 아니라 limits[]의
+  // kind:'weekly_scoped' + scope.model.display_name으로만 내려온다
+  // (2026-09 실제 /api/oauth/usage 응답으로 검증됨).
+  describe('parseAndCacheLimits — weekly_scoped Fable limit', () => {
+    it('should extract seven_day_fable from limits[] when weekly_scoped Fable entry exists', async () => {
+      const { getCredentials } = await import('../utils/credentials.js');
+      vi.mocked(getCredentials).mockResolvedValue('fable-limit-token');
+      await deleteFileCacheForToken('fable-limit-token');
+
+      const mockResponse = {
+        five_hour: null,
+        seven_day: null,
+        seven_day_sonnet: null,
+        limits: [
+          {
+            kind: 'session',
+            group: 'session',
+            percent: 17,
+            severity: 'normal',
+            resets_at: '2026-09-22T08:10:00.989157+00:00',
+            scope: null,
+            is_active: false,
+          },
+          {
+            kind: 'weekly_all',
+            group: 'weekly',
+            percent: 30,
+            severity: 'normal',
+            resets_at: '2026-09-28T01:00:00.989177+00:00',
+            scope: null,
+            is_active: true,
+          },
+          {
+            kind: 'weekly_scoped',
+            group: 'weekly',
+            percent: 28,
+            severity: 'normal',
+            resets_at: '2026-09-28T01:00:00.989331+00:00',
+            scope: { model: { id: null, display_name: 'Fable' }, surface: null },
+            is_active: false,
+          },
+        ],
+      };
+
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve(mockResponse),
+      });
+
+      const { fetchUsageLimits, clearCache } = await import('../utils/api-client.js');
+      clearCache();
+
+      const result = await fetchUsageLimits();
+
+      expect(result?.seven_day_fable).toEqual({
+        utilization: 28,
+        resets_at: '2026-09-28T01:00:00.989331+00:00',
+      });
+    });
+
+    it('should return null for seven_day_fable when limits[] is missing', async () => {
+      const { getCredentials } = await import('../utils/credentials.js');
+      vi.mocked(getCredentials).mockResolvedValue('fable-nolimits-token');
+      await deleteFileCacheForToken('fable-nolimits-token');
+
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ five_hour: null, seven_day: null, seven_day_sonnet: null }),
+      });
+
+      const { fetchUsageLimits, clearCache } = await import('../utils/api-client.js');
+      clearCache();
+
+      const result = await fetchUsageLimits();
+
+      expect(result?.seven_day_fable).toBeNull();
+    });
+
+    it('should return null for seven_day_fable when weekly_scoped entry belongs to a different model', async () => {
+      const { getCredentials } = await import('../utils/credentials.js');
+      vi.mocked(getCredentials).mockResolvedValue('fable-wrongmodel-token');
+      await deleteFileCacheForToken('fable-wrongmodel-token');
+
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({
+            five_hour: null,
+            seven_day: null,
+            seven_day_sonnet: null,
+            limits: [
+              {
+                kind: 'weekly_scoped',
+                group: 'weekly',
+                percent: 40,
+                severity: 'normal',
+                resets_at: '2026-09-28T01:00:00.989331+00:00',
+                scope: { model: { id: null, display_name: 'Sonnet' }, surface: null },
+                is_active: false,
+              },
+            ],
+          }),
+      });
+
+      const { fetchUsageLimits, clearCache } = await import('../utils/api-client.js');
+      clearCache();
+
+      const result = await fetchUsageLimits();
+
+      expect(result?.seven_day_fable).toBeNull();
+    });
+
+    it('should return null for seven_day_fable without crashing when limits is not an array', async () => {
+      const { getCredentials } = await import('../utils/credentials.js');
+      vi.mocked(getCredentials).mockResolvedValue('fable-notarray-token');
+      await deleteFileCacheForToken('fable-notarray-token');
+
+      global.fetch = vi.fn().mockResolvedValue({
+        ok: true,
+        json: () =>
+          Promise.resolve({ five_hour: null, seven_day: null, seven_day_sonnet: null, limits: {} }),
+      });
+
+      const { fetchUsageLimits, clearCache } = await import('../utils/api-client.js');
+      clearCache();
+
+      const result = await fetchUsageLimits();
+
+      expect(result?.seven_day_fable).toBeNull();
+    });
+  });
+
   describe('429 retry', () => {
     it('should retry once when retry-after is within limit', async () => {
       const { getCredentials } = await import('../utils/credentials.js');
@@ -157,6 +290,7 @@ describe('api-client', () => {
         five_hour: { utilization: 0.1, resets_at: '2024-01-01T00:00:00Z' },
         seven_day: null,
         seven_day_sonnet: null,
+        seven_day_fable: null,
       };
 
       const fetchMock = vi.fn()
@@ -237,6 +371,7 @@ describe('api-client', () => {
         five_hour: { utilization: 0.3, resets_at: '2024-01-01T00:00:00Z' },
         seven_day: null,
         seven_day_sonnet: null,
+        seven_day_fable: null,
       };
       await mkdir(ACTUAL_CACHE_DIR, { recursive: true, mode: 0o700 });
       await writeFile(
@@ -357,6 +492,7 @@ describe('api-client', () => {
         five_hour: { utilization: 0.42, resets_at: '2024-06-01T00:00:00Z' },
         seven_day: null,
         seven_day_sonnet: null,
+        seven_day_fable: null,
       };
       await mkdir(ACTUAL_CACHE_DIR, { recursive: true, mode: 0o700 });
       await writeFile(
@@ -405,6 +541,7 @@ describe('api-client', () => {
         five_hour: { utilization: 0.1, resets_at: '2024-01-01T00:00:00Z' },
         seven_day: null,
         seven_day_sonnet: null,
+        seven_day_fable: null,
       };
 
       const fetchMock = vi.fn().mockResolvedValue({
@@ -441,7 +578,7 @@ describe('api-client', () => {
       const oldCacheFile = path.join(ACTUAL_CACHE_DIR, 'cache-cleanup-test-old.json');
       await writeFile(
         oldCacheFile,
-        JSON.stringify({ data: { five_hour: null, seven_day: null, seven_day_sonnet: null }, timestamp: Date.now() })
+        JSON.stringify({ data: { five_hour: null, seven_day: null, seven_day_sonnet: null, seven_day_fable: null }, timestamp: Date.now() })
       );
 
       // Set file mtime to 2 hours ago (older than CACHE_CLEANUP_AGE_SECONDS = 3600)
@@ -459,7 +596,7 @@ describe('api-client', () => {
       global.fetch = vi.fn().mockResolvedValue({
         ok: true,
         json: () =>
-          Promise.resolve({ five_hour: null, seven_day: null, seven_day_sonnet: null }),
+          Promise.resolve({ five_hour: null, seven_day: null, seven_day_sonnet: null, seven_day_fable: null }),
       });
 
       const { fetchUsageLimits, clearCache } = await import('../utils/api-client.js');
@@ -494,6 +631,7 @@ describe('api-client', () => {
         five_hour: { utilization: 0.33, resets_at: '2024-01-01T00:00:00Z' },
         seven_day: null,
         seven_day_sonnet: null,
+        seven_day_fable: null,
       };
       await mkdir(ACTUAL_CACHE_DIR, { recursive: true, mode: 0o700 });
       await writeFile(
@@ -545,6 +683,7 @@ describe('api-client', () => {
         five_hour: { utilization: 0.5, resets_at: '2024-01-01T00:00:00Z' },
         seven_day: null,
         seven_day_sonnet: null,
+        seven_day_fable: null,
       };
       await mkdir(ACTUAL_CACHE_DIR, { recursive: true, mode: 0o700 });
       await writeFile(
@@ -584,6 +723,7 @@ describe('api-client', () => {
         five_hour: { utilization: 0.2, resets_at: '2024-01-01T00:00:00Z' },
         seven_day: null,
         seven_day_sonnet: null,
+        seven_day_fable: null,
       };
       const fetchMock = vi.fn().mockResolvedValue({
         ok: true,

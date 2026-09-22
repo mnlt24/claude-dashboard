@@ -129,6 +129,7 @@ function parseStdinRateLimits(stdin: StdinInput): UsageLimits | null {
     five_hour: rl.five_hour ? convertStdinLimit(rl.five_hour) : null,
     seven_day: rl.seven_day ? convertStdinLimit(rl.seven_day) : null,
     seven_day_sonnet: null, // Not available in stdin
+    seven_day_fable: null, // Not available in stdin
   };
 }
 
@@ -167,9 +168,13 @@ async function main(): Promise<void> {
     // Stdin rate_limits not yet available — cache-only fallback
     rateLimits = await fetchUsageLimits(config.cache.ttlSeconds, { cacheOnly: true });
   } else if (config.plan === 'max') {
-    // Hybrid: stdin for 5h/7d, cache-only for seven_day_sonnet
+    // Hybrid: stdin for 5h/7d, cache-only for API-only buckets (seven_day_sonnet, seven_day_fable)
     const apiLimits = await fetchUsageLimits(config.cache.ttlSeconds, { cacheOnly: true });
-    rateLimits = { ...stdinLimits, seven_day_sonnet: apiLimits?.seven_day_sonnet ?? null };
+    rateLimits = {
+      ...stdinLimits,
+      seven_day_sonnet: apiLimits?.seven_day_sonnet ?? null,
+      seven_day_fable: apiLimits?.seven_day_fable ?? null,
+    };
   } else {
     rateLimits = stdinLimits;
   }

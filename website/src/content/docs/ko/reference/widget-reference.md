@@ -81,6 +81,13 @@ sidebar:
 - **표시 내용**: 7일 Sonnet 모델 사용량. Max 플랜에서만 표시됩니다.
 - **출력 예시**: `7dS: 55%`
 
+### rateLimit7dFable
+
+- **ID**: `rateLimit7dFable`
+- **데이터 소스**: API (OAuth usage 엔드포인트)
+- **표시 내용**: 7일 Fable 모델 사용량. Max 플랜에서만 표시됩니다.
+- **출력 예시**: `7df: 28%`
+
 ## Session
 
 ### sessionId

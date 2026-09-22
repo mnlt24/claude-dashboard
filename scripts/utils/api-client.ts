@@ -334,6 +334,49 @@ function validateLimitWindow(
 }
 
 /**
+ * 모델 범위(scoped) 주간 한도를 `limits[]` 배열에서 추출.
+ *
+ * 평면 키(`seven_day_opus`/`seven_day_sonnet`)와 달리 Fable 등 일부 모델의
+ * 주간 한도는 평면 키로 내려오지 않고(null 고정), `limits[]`의
+ * `kind: 'weekly_scoped'` 항목 + `scope.model.display_name`으로만 식별 가능하다
+ * (2026-09 실제 `/api/oauth/usage` 응답으로 검증됨). 또한 이 배열 항목은
+ * `utilization`이 아니라 `percent` 필드를 사용하고, `scope.model.id`는 항상
+ * `null`이라 `display_name`(예: "Fable")의 첫 단어로만 매칭 가능하다.
+ *
+ * 배열 형태가 아니거나 조건에 맞는 항목이 없으면 크래시 없이 null 반환
+ * (graceful degradation).
+ */
+function extractScopedWeeklyLimit(
+  rawLimits: unknown,
+  modelName: string
+): { utilization: number; resets_at: string | null } | null {
+  if (!Array.isArray(rawLimits)) return null;
+
+  for (const entry of rawLimits) {
+    if (!entry || typeof entry !== 'object') continue;
+    const item = entry as Record<string, unknown>;
+    if (item.kind !== 'weekly_scoped') continue;
+
+    const scope = item.scope as Record<string, unknown> | undefined;
+    const model = scope?.model as Record<string, unknown> | undefined;
+    const displayName = model?.display_name;
+    if (typeof displayName !== 'string') continue;
+
+    const firstWord = displayName.trim().split(/\s+/)[0]?.toLowerCase();
+    if (firstWord !== modelName.toLowerCase()) continue;
+
+    if (typeof item.percent !== 'number') continue;
+
+    return {
+      utilization: item.percent,
+      resets_at: typeof item.resets_at === 'string' ? item.resets_at : null,
+    };
+  }
+
+  return null;
+}
+
+/**
  * Parse API response and update caches
  */
 async function parseAndCacheLimits(data: unknown, tokenHash: string): Promise<UsageLimits> {
@@ -342,6 +385,7 @@ async function parseAndCacheLimits(data: unknown, tokenHash: string): Promise<Us
     five_hour: validateLimitWindow(d.five_hour),
     seven_day: validateLimitWindow(d.seven_day),
     seven_day_sonnet: validateLimitWindow(d.seven_day_sonnet),
+    seven_day_fable: extractScopedWeeklyLimit(d.limits, 'fable'),
   };
 
   usageCacheMap.set(tokenHash, { data: limits, timestamp: Date.now() });

@@ -16,7 +16,7 @@ Configure the claude-dashboard status line plugin with widget system support.
 ### Direct Mode Arguments
 
 - `$1`: Display mode
-  - `compact` (default): 1 line (model, context, cost, rateLimit5h, rateLimit7d, rateLimit7dSonnet, zaiUsage)
+  - `compact` (default): 1 line (model, context, cost, rateLimit5h, rateLimit7d, rateLimit7dSonnet, rateLimit7dFable, zaiUsage)
   - `normal`: 2 lines (+ projectInfo, sessionId, sessionDuration, burnRate, todoProgress)
   - `detailed`: 6 lines (+ sessionName, tokenSpeed, depletionTime, configCounts, toolActivity, agentStatus, cacheHit, performance, tokenBreakdown, forecast, budget, todayCost, codexUsage, geminiUsage, linesChanged, outputStyle, version, peakHours, lastPrompt, vimMode, apiDuration, tagStatus)
   - `custom`: Custom widget configuration (requires `$4`)
@@ -48,6 +48,7 @@ Configure the claude-dashboard status line plugin with widget system support.
 | `rateLimit5h` | 5-hour rate limit |
 | `rateLimit7d` | 7-day rate limit (Pro/Max) |
 | `rateLimit7dSonnet` | 7-day Sonnet limit (Max) |
+| `rateLimit7dFable` | 7-day Fable limit (Max) |
 | `projectInfo` | Directory name + git branch + ahead/behind (↑↓), subpath from project_dir, worktree indicator |
 | `configCounts` | CLAUDE.md, AGENTS.md, rules, MCPs, hooks, +Dirs counts |
 | `sessionId` | Session ID (short 8 chars) |
@@ -126,7 +127,7 @@ For each line `N` (starting at 1), repeat the following sub-flow until the user 
 Single AskUserQuestion call with `multiSelect: true`, max 4 options. Ask: "Line `N`: which widget categories do you want to pull from?" The 4 category options are:
 
 1. **Model & Context** — `model`, `context`, `contextBar`, `contextPercentage`, `contextUsage`
-2. **Cost & Limits** — `cost`, `rateLimit5h`, `rateLimit7d`, `rateLimit7dSonnet`, `budget`, `forecast`, `todayCost`
+2. **Cost & Limits** — `cost`, `rateLimit5h`, `rateLimit7d`, `rateLimit7dSonnet`, `rateLimit7dFable`, `budget`, `forecast`, `todayCost`
 3. **Project, Session & Activity** — `projectInfo`, `sessionId`, `sessionIdFull`, `sessionDuration`, `sessionName`, `configCounts`, `toolActivity`, `agentStatus`, `agentMode`, `todoProgress`, `outputStyle`, `vimMode`, `linesChanged`, `version`, `lastPrompt`, `slashCommand`
 4. **Performance, Tokens & Other CLIs** — `burnRate`, `tokenSpeed`, `cacheHit`, `performance`, `tokenBreakdown`, `depletionTime`, `apiDuration`, `peakHours`, `tagStatus`, `codexUsage`, `geminiUsage`, `geminiUsageAll`, `zaiUsage`
 
