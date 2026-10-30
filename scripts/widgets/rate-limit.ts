@@ -10,7 +10,7 @@
  */
 
 import type { Widget } from './base.js';
-import type { WidgetContext, RateLimitData, UsageLimits } from '../types.js';
+import type { WidgetContext, RateLimitData, UsageLimits, Config } from '../types.js';
 import { getColorForPercent, colorize, getTheme } from '../utils/colors.js';
 import { ICON } from '../utils/emoji.js';
 import { formatTimeRemaining } from '../utils/formatters.js';
@@ -51,6 +51,13 @@ function shouldHideAnthropicLimits(): boolean {
 }
 
 /**
+ * 모델별 7일 한도(Sonnet/Fable) 버킷을 노출하는 플랜인지 여부 (Max/Ultra)
+ */
+export function hasModelScopedWeeklyLimits(plan: Config['plan']): boolean {
+  return plan === 'max' || plan === 'ultra';
+}
+
+/**
  * 5-hour rate limit widget
  */
 export const rateLimit5hWidget: Widget<RateLimitData> = {
@@ -59,9 +66,13 @@ export const rateLimit5hWidget: Widget<RateLimitData> = {
 
   async getData(ctx: WidgetContext): Promise<RateLimitData | null> {
     if (shouldHideAnthropicLimits()) return null;
-    const data = getLimitData(ctx.rateLimits, 'five_hour');
-    // Show warning if API failed (only in this widget to avoid duplicates)
-    return data ?? { utilization: 0, resetsAt: null, isError: true };
+    const limits = ctx.rateLimits;
+    const data = getLimitData(limits, 'five_hour');
+    if (data) return data;
+    // five_hour만 null이고 다른 버킷 값이 있으면 5h 한도가 없는 계정(검증된 Ultra) → 오류 아님, 숨김.
+    // 모든 버킷이 null(조회 실패·빈 응답·stdin 누락)이면 경고 (중복 방지를 위해 이 위젯에서만)
+    const hasOtherLimits = !!(limits?.seven_day || limits?.seven_day_sonnet || limits?.seven_day_fable);
+    return hasOtherLimits ? null : { utilization: 0, resetsAt: null, isError: true };
   },
 
   render(data: RateLimitData, ctx: WidgetContext): string {
@@ -70,7 +81,7 @@ export const rateLimit5hWidget: Widget<RateLimitData> = {
 };
 
 /**
- * 7-day rate limit widget (Pro and Max plans)
+ * 7-day rate limit widget (Pro, Max, Ultra plans)
  */
 export const rateLimit7dWidget: Widget<RateLimitData> = {
   id: 'rateLimit7d',
@@ -87,7 +98,7 @@ export const rateLimit7dWidget: Widget<RateLimitData> = {
 };
 
 /**
- * 7-day Sonnet-only rate limit widget (Max plan only)
+ * 7-day Sonnet-only rate limit widget (Max/Ultra)
  */
 export const rateLimit7dSonnetWidget: Widget<RateLimitData> = {
   id: 'rateLimit7dSonnet',
@@ -95,7 +106,7 @@ export const rateLimit7dSonnetWidget: Widget<RateLimitData> = {
 
   async getData(ctx: WidgetContext): Promise<RateLimitData | null> {
     if (shouldHideAnthropicLimits()) return null;
-    if (ctx.config.plan !== 'max') return null;
+    if (!hasModelScopedWeeklyLimits(ctx.config.plan)) return null;
     return getLimitData(ctx.rateLimits, 'seven_day_sonnet');
   },
 
@@ -105,7 +116,7 @@ export const rateLimit7dSonnetWidget: Widget<RateLimitData> = {
 };
 
 /**
- * 7-day Fable-only rate limit widget (Max plan only) — API `limits[]`
+ * 7-day Fable-only rate limit widget (Max/Ultra) — API `limits[]`
  * weekly_scoped 버킷 기반
  */
 export const rateLimit7dFableWidget: Widget<RateLimitData> = {
@@ -114,7 +125,7 @@ export const rateLimit7dFableWidget: Widget<RateLimitData> = {
 
   async getData(ctx: WidgetContext): Promise<RateLimitData | null> {
     if (shouldHideAnthropicLimits()) return null;
-    if (ctx.config.plan !== 'max') return null;
+    if (!hasModelScopedWeeklyLimits(ctx.config.plan)) return null;
     return getLimitData(ctx.rateLimits, 'seven_day_fable');
   },
 

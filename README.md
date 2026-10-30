@@ -110,6 +110,7 @@ i18n: English and Korean supported (auto-detect or set via setup).
 /claude-dashboard:setup compact             # 1 line (default)
 /claude-dashboard:setup normal en pro       # 2 lines, English, Pro plan
 /claude-dashboard:setup detailed ko max     # 6 lines, Korean, Max plan
+/claude-dashboard:setup detailed ko ultra   # 6 lines, Korean, Ultra plan
 
 # Custom mode: control widget order and line composition
 # Format: "widget1,widget2,...|widget3,widget4,..." (| separates lines)
@@ -118,10 +119,13 @@ i18n: English and Korean supported (auto-detect or set via setup).
 
 **Plan differences:**
 
-| Feature | Max | Pro |
-|---------|-----|-----|
-| 5h rate limit + countdown | ✅ | ✅ |
-| 7d all models | ✅ | ❌ |
+Max = formerly Max 5x, Ultra = formerly Max 20x (same prices, migrated automatically).
+
+| Feature | Ultra | Max | Pro |
+|---------|-------|-----|-----|
+| 5h rate limit + countdown | None for verified accounts (hidden when no 5h data) | ✅ | ✅ |
+| 7d all models | ✅ | ✅ | ❌ |
+| 7d Sonnet / Fable | ✅ | ✅ | ❌ |
 
 <details>
 <summary><strong>Advanced Configuration</strong></summary>

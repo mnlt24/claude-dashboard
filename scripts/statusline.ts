@@ -23,6 +23,7 @@ import { isGeminiInstalled, fetchGeminiUsage } from './utils/gemini-client.js';
 import { usesAnthropicRateLimits } from './utils/provider.js';
 import { getTranslations } from './utils/i18n.js';
 import { formatOutput } from './widgets/index.js';
+import { hasModelScopedWeeklyLimits } from './widgets/rate-limit.js';
 import { maybeSpawnRefresh } from './utils/background-refresh.js';
 import { debugLog } from './utils/debug.js';
 
@@ -167,7 +168,7 @@ async function main(): Promise<void> {
   } else if (!stdinLimits) {
     // Stdin rate_limits not yet available — cache-only fallback
     rateLimits = await fetchUsageLimits(config.cache.ttlSeconds, { cacheOnly: true });
-  } else if (config.plan === 'max') {
+  } else if (hasModelScopedWeeklyLimits(config.plan)) {
     // Hybrid: stdin for 5h/7d, cache-only for API-only buckets (seven_day_sonnet, seven_day_fable)
     const apiLimits = await fetchUsageLimits(config.cache.ttlSeconds, { cacheOnly: true });
     rateLimits = {

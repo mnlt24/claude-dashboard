@@ -27,7 +27,8 @@ Configure the claude-dashboard status line plugin with widget system support.
   - `ko`: Korean
 
 - `$3`: Subscription plan
-  - `max` (default): Shows 5h + 7d rate limits
+  - `max` (default, formerly Max 5x): Shows 5h + 7d (+ Sonnet/Fable 7d) rate limits
+  - `ultra` (formerly Max 20x): Shows 7d (+ Sonnet/Fable 7d); 5h is auto-hidden for verified accounts with no 5h limit
   - `pro`: Shows 5h only
 
 - `$4`: Custom lines (only for `custom` mode)
@@ -113,7 +114,7 @@ Use AskUserQuestion to ask the user. Batch independent questions into a single A
      Full control over layout and ordering.
      ```
 2. Language: auto (recommended), en, ko
-3. Plan: max (recommended), pro
+3. Plan: max (recommended), ultra, pro
 4. Theme: default (recommended), minimal, "catppuccin (mocha / latte — light)", "dracula / gruvbox / nord / tokyoNight / solarized"
    - All themes are dark except `catppuccinLatte`, which is designed for light-mode terminals
    - If multi-option selected: ask in next turn which one

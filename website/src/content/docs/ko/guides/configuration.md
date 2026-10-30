@@ -47,6 +47,8 @@ sidebar:
 | 5시간 속도 제한 + 카운트다운 | O | O |
 | 7일 전체 모델 사용량 | O | O |
 
+Max = 구 Max 5x, Ultra = 구 Max 20x입니다. 검증된 Ultra 계정은 5시간 한도가 없어 5h 위젯이 자동으로 숨겨집니다(미검증 계정은 임시 5h 한도가 표시됨).
+
 ## 설정 파일
 
 설정 파일 위치: `~/.claude/claude-dashboard.local.json`

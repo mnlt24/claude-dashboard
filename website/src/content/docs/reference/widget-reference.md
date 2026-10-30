@@ -122,7 +122,7 @@ $0.03
 |----------|-------|
 | **Widget ID** | `rateLimit7dSonnet` |
 | **Data Source** | API (oauth/usage) |
-| **Description** | Shows the 7-day Sonnet-specific rate limit utilization. Max plan only. |
+| **Description** | Shows the 7-day Sonnet-specific rate limit utilization. Max/Ultra plans only. |
 
 **Example output:**
 ```
@@ -135,7 +135,7 @@ $0.03
 |----------|-------|
 | **Widget ID** | `rateLimit7dFable` |
 | **Data Source** | API (oauth/usage) |
-| **Description** | Shows the 7-day Fable-specific rate limit utilization. Max plan only. |
+| **Description** | Shows the 7-day Fable-specific rate limit utilization. Max/Ultra plans only. |
 
 **Example output:**
 ```

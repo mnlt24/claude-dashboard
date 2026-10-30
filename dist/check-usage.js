@@ -1993,8 +1993,9 @@ function renderGeminiSection(usage, geminiData, t) {
 }
 function calculateRecommendation(claudeUsage, codexUsage, geminiUsage, zaiUsage, t) {
   const candidates = [];
-  if (usesAnthropicRateLimits() && !claudeUsage.error && claudeUsage.fiveHourPercent !== null) {
-    candidates.push({ name: "claude", score: claudeUsage.fiveHourPercent });
+  const claudeScore = claudeUsage.fiveHourPercent ?? claudeUsage.sevenDayPercent;
+  if (usesAnthropicRateLimits() && !claudeUsage.error && claudeScore !== null) {
+    candidates.push({ name: "claude", score: claudeScore });
   }
   if (codexUsage && codexUsage.available && !codexUsage.error && codexUsage.fiveHourPercent !== null) {
     candidates.push({ name: "codex", score: codexUsage.fiveHourPercent });

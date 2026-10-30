@@ -42,7 +42,19 @@ describe('rate-limit widgets', () => {
       expect(result).toContain(ICON.warning);
     });
 
-    it('should return error data when five_hour is not available', async () => {
+    it('should hide (null) when five_hour is null but other buckets exist (no 5h limit, e.g. Ultra)', async () => {
+      const ctx = createContext({
+        five_hour: null,
+        seven_day: { utilization: 30, resets_at: null },
+        seven_day_sonnet: null,
+        seven_day_fable: null,
+      });
+      const data = await rateLimit5hWidget.getData(ctx);
+
+      expect(data).toBeNull();
+    });
+
+    it('should return error data when all buckets are null (empty response / missing stdin windows)', async () => {
       const ctx = createContext({
         five_hour: null,
         seven_day: null,
@@ -51,8 +63,16 @@ describe('rate-limit widgets', () => {
       });
       const data = await rateLimit5hWidget.getData(ctx);
 
-      expect(data).not.toBeNull();
       expect(data?.isError).toBe(true);
+    });
+
+    it('should show five_hour for ultra plan when value present (unverified Ultra)', async () => {
+      const ctx = createContext(
+        { five_hour: { utilization: 10, resets_at: null }, seven_day: null, seven_day_sonnet: null, seven_day_fable: null },
+        { plan: 'ultra' }
+      );
+      const data = await rateLimit5hWidget.getData(ctx);
+      expect(data?.utilization).toBe(10);
     });
 
     it('should return correct data when five_hour is available', async () => {
@@ -138,6 +158,15 @@ describe('rate-limit widgets', () => {
   });
 
   describe('rateLimit7dSonnetWidget', () => {
+    it('should show data for ultra plan when seven_day_sonnet is available', async () => {
+      const ctx = createContext(
+        { five_hour: null, seven_day: null, seven_day_sonnet: { utilization: 25, resets_at: null }, seven_day_fable: null },
+        { plan: 'ultra' }
+      );
+      const data = await rateLimit7dSonnetWidget.getData(ctx);
+      expect(data?.utilization).toBe(25);
+    });
+
     it('should return null for non-max plan', async () => {
       const ctx = createContext(
         { five_hour: null, seven_day: null, seven_day_sonnet: { utilization: 25, resets_at: null }, seven_day_fable: null },
@@ -170,6 +199,15 @@ describe('rate-limit widgets', () => {
   });
 
   describe('rateLimit7dFableWidget', () => {
+    it('should show data for ultra plan when seven_day_fable is available', async () => {
+      const ctx = createContext(
+        { five_hour: null, seven_day: null, seven_day_sonnet: null, seven_day_fable: { utilization: 28, resets_at: null } },
+        { plan: 'ultra' }
+      );
+      const data = await rateLimit7dFableWidget.getData(ctx);
+      expect(data?.utilization).toBe(28);
+    });
+
     it('should return null for non-max plan', async () => {
       const ctx = createContext(
         { five_hour: null, seven_day: null, seven_day_sonnet: null, seven_day_fable: { utilization: 28, resets_at: null } },

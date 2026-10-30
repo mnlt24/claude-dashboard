@@ -280,6 +280,13 @@ describe('calculateRecommendation', () => {
     expect(result.reason).toBe('No usage data available');
   });
 
+  it('should fall back to 7d usage for Claude when 5h is null (Ultra)', () => {
+    const claude = createUsage({ name: 'Claude', fiveHourPercent: null, sevenDayPercent: 20 });
+    const result = calculateRecommendation(claude, null, null, null, MOCK_TRANSLATIONS);
+    expect(result.name).toBe('claude');
+    expect(result.reason).toContain('20%');
+  });
+
   it('should recommend CLI with lowest 5h usage', () => {
     const claude = createUsage({ name: 'Claude', fiveHourPercent: 50 });
     const codex = createUsage({ name: 'Codex', fiveHourPercent: 30 });

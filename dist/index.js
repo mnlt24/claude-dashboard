@@ -2245,14 +2245,21 @@ function getLimitData(limits, key) {
 function shouldHideAnthropicLimits() {
   return !usesAnthropicRateLimits();
 }
+function hasModelScopedWeeklyLimits(plan) {
+  return plan === "max" || plan === "ultra";
+}
 var rateLimit5hWidget = {
   id: "rateLimit5h",
   name: "5h Rate Limit",
   async getData(ctx) {
     if (shouldHideAnthropicLimits())
       return null;
-    const data = getLimitData(ctx.rateLimits, "five_hour");
-    return data ?? { utilization: 0, resetsAt: null, isError: true };
+    const limits = ctx.rateLimits;
+    const data = getLimitData(limits, "five_hour");
+    if (data)
+      return data;
+    const hasOtherLimits = !!(limits?.seven_day || limits?.seven_day_sonnet || limits?.seven_day_fable);
+    return hasOtherLimits ? null : { utilization: 0, resetsAt: null, isError: true };
   },
   render(data, ctx) {
     return renderRateLimit(data, ctx, "5h");
@@ -2276,7 +2283,7 @@ var rateLimit7dSonnetWidget = {
   async getData(ctx) {
     if (shouldHideAnthropicLimits())
       return null;
-    if (ctx.config.plan !== "max")
+    if (!hasModelScopedWeeklyLimits(ctx.config.plan))
       return null;
     return getLimitData(ctx.rateLimits, "seven_day_sonnet");
   },
@@ -2290,7 +2297,7 @@ var rateLimit7dFableWidget = {
   async getData(ctx) {
     if (shouldHideAnthropicLimits())
       return null;
-    if (ctx.config.plan !== "max")
+    if (!hasModelScopedWeeklyLimits(ctx.config.plan))
       return null;
     return getLimitData(ctx.rateLimits, "seven_day_fable");
   },
@@ -4268,7 +4275,7 @@ async function main() {
     rateLimits = null;
   } else if (!stdinLimits) {
     rateLimits = await fetchUsageLimits(config.cache.ttlSeconds, { cacheOnly: true });
-  } else if (config.plan === "max") {
+  } else if (hasModelScopedWeeklyLimits(config.plan)) {
     const apiLimits = await fetchUsageLimits(config.cache.ttlSeconds, { cacheOnly: true });
     rateLimits = {
       ...stdinLimits,

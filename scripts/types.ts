@@ -189,7 +189,8 @@ export type SeparatorStyle = 'pipe' | 'space' | 'dot' | 'arrow';
  */
 export interface Config {
   language: 'en' | 'ko' | 'auto';
-  plan: 'pro' | 'max';
+  /** 구독 플랜: pro / max(구 Max 5x) / ultra(구 Max 20x). max·ultra는 모델별 7d 버킷 위젯 표시 */
+  plan: 'pro' | 'max' | 'ultra';
   /** Display mode: preset (compact/normal/detailed) or custom */
   displayMode: DisplayMode;
   /** Custom line configuration (only used when displayMode is 'custom') */

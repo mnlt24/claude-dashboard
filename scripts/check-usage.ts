@@ -215,8 +215,10 @@ export function calculateRecommendation(
   // Claude score (lower is better - using 5h as primary metric)
   // Exclude from recommendations for non-Anthropic providers (z.ai/ZHIPU/Bedrock/Vertex):
   // their sessions don't use Anthropic subscription rate limits, so 5h % is inapplicable.
-  if (usesAnthropicRateLimits() && !claudeUsage.error && claudeUsage.fiveHourPercent !== null) {
-    candidates.push({ name: 'claude', score: claudeUsage.fiveHourPercent });
+  // 5h 한도가 없는 계정(검증된 Ultra)은 5h가 null → 7d로 폴백 (둘 다 null이면 제외)
+  const claudeScore = claudeUsage.fiveHourPercent ?? claudeUsage.sevenDayPercent;
+  if (usesAnthropicRateLimits() && !claudeUsage.error && claudeScore !== null) {
+    candidates.push({ name: 'claude', score: claudeScore });
   }
 
   // Codex score
