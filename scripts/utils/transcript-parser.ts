@@ -8,8 +8,10 @@
  * so extract functions read O(1) instead of scanning the full transcript.
  */
 
-import { open, stat } from 'fs/promises';
+import { open, stat, readFile, writeFile, mkdir, rename } from 'fs/promises';
+import { createHash } from 'crypto';
 import { basename } from 'path';
+import { fileCachePath, FILE_CACHE_DIR } from './file-cache.js';
 import type { TranscriptEntry, ParsedTranscript, TodoProgressData, WidgetContext, SlashCommandData } from '../types.js';
 import { truncate } from './formatters.js';
 
@@ -226,30 +228,201 @@ function processEntries(
   }
 }
 
+/** 스트리밍 읽기 청크 크기 (메모리 상한은 청크 + 가장 긴 한 줄) */
+const READ_CHUNK_BYTES = 1024 * 1024;
+/** 디스크 캐시 검증용으로 offset 바로 앞에서 읽는 바이트 수 */
+const TAIL_FINGERPRINT_BYTES = 64;
+/** 디스크 캐시 파일 스키마 버전 (ParsedTranscript 구조가 바뀌면 올린다) */
+const DISK_CACHE_VERSION = 1;
+
 /**
- * Read bytes from file starting at offset
+ * 파싱 결과에 영향 없는 줄을 JSON.parse 전에 걸러낸다.
+ * processEntries 는 tool_use/tool_result, customTitle, user 항목, 첫 timestamp 만 본다.
+ * (대화 본문뿐인 assistant 줄이 transcript 의 대부분을 차지한다.)
  */
-async function readFromOffset(
+function isRelevantLine(line: string): boolean {
+  return (
+    line.includes('tool_use') ||
+    line.includes('tool_result') ||
+    line.includes('customTitle') ||
+    line.includes('"user"')
+  );
+}
+
+/**
+ * 파일을 offset 부터 청크 단위로 읽어 줄 단위로 처리한다 (전체를 메모리에 올리지 않는다).
+ * 개행으로 끝나지 않은 마지막 줄은 아직 쓰는 중일 수 있어 건드리지 않는다
+ * (완결된 JSON 이면 처리). 반환값은 처리를 마친 바이트 offset.
+ */
+async function streamEntries(
   filePath: string,
   offset: number,
-  fileSize: number
-): Promise<string> {
-  const bytesToRead = fileSize - offset;
-  if (bytesToRead <= 0) return '';
+  fileSize: number,
+  data: ParsedTranscript
+): Promise<number> {
+  if (fileSize <= offset) return offset;
 
   const fd = await open(filePath, 'r');
   try {
-    const buffer = Buffer.alloc(bytesToRead);
-    await fd.read(buffer, 0, bytesToRead, offset);
-    return buffer.toString('utf-8');
+    const buffer = Buffer.alloc(READ_CHUNK_BYTES);
+    let pos = offset;
+    let carry: Buffer[] = [];
+    let carryLen = 0;
+    let consumed = offset;
+
+    const handleLine = (lineBuf: Buffer): boolean => {
+      if (lineBuf.length === 0) return true;
+      const line = lineBuf.toString('utf-8');
+      // sessionStartTime 은 첫 timestamp 항목에서 정해지므로 그 전까지는 거르지 않는다
+      if (data.sessionStartTime && !isRelevantLine(line)) return true;
+      try {
+        processEntries([JSON.parse(line) as TranscriptEntry], data);
+        return true;
+      } catch {
+        return false; // malformed
+      }
+    };
+
+    while (pos < fileSize) {
+      const want = Math.min(READ_CHUNK_BYTES, fileSize - pos);
+      const { bytesRead } = await fd.read(buffer, 0, want, pos);
+      if (bytesRead <= 0) break;
+      const chunk = buffer.subarray(0, bytesRead);
+
+      let start = 0;
+      let nl = chunk.indexOf(0x0a, start);
+      while (nl !== -1) {
+        const piece = chunk.subarray(start, nl);
+        const lineBuf = carryLen > 0 ? Buffer.concat([...carry, piece], carryLen + piece.length) : piece;
+        carry = [];
+        carryLen = 0;
+        handleLine(lineBuf);
+        start = nl + 1;
+        nl = chunk.indexOf(0x0a, start);
+      }
+      consumed = pos + start;
+      if (start < bytesRead) {
+        const rest = Buffer.from(chunk.subarray(start)); // buffer 재사용 전에 복사
+        carry.push(rest);
+        carryLen += rest.length;
+      }
+      pos += bytesRead;
+    }
+
+    // 개행 없는 마지막 줄: 완결된 JSON 일 때만 처리하고 offset 을 넘긴다
+    if (carryLen > 0) {
+      const ok = handleLine(Buffer.concat(carry, carryLen));
+      if (ok) consumed = pos;
+    }
+    return consumed;
   } finally {
     await fd.close();
   }
 }
 
+/** offset 바로 앞 바이트(hex) — 디스크 캐시가 같은 파일의 앞부분인지 확인하는 지문 */
+async function readFingerprint(filePath: string, offset: number): Promise<string> {
+  if (offset <= 0) return '';
+  const len = Math.min(TAIL_FINGERPRINT_BYTES, offset);
+  const fd = await open(filePath, 'r');
+  try {
+    const buf = Buffer.alloc(len);
+    const { bytesRead } = await fd.read(buf, 0, len, offset - len);
+    return buf.subarray(0, bytesRead).toString('hex');
+  } finally {
+    await fd.close();
+  }
+}
+
+interface DiskCacheFile {
+  v: number;
+  path: string;
+  offset: number;
+  fingerprint: string;
+  data: unknown;
+}
+
+function diskCacheFile(transcriptPath: string): string | null {
+  if (process.env.CLAUDE_DASHBOARD_NO_TRANSCRIPT_CACHE) return null;
+  const key = createHash('sha256').update(transcriptPath).digest('hex').substring(0, 16);
+  return fileCachePath(`transcript-state-${key}.json`);
+}
+
+function serializeParsed(d: ParsedTranscript): unknown {
+  return {
+    ...d,
+    toolUses: [...d.toolUses],
+    runningToolIds: [...d.runningToolIds],
+    activeAgentIds: [...d.activeAgentIds],
+    tasks: [...d.tasks],
+    pendingTaskCreates: [...d.pendingTaskCreates],
+    pendingTaskUpdates: [...d.pendingTaskUpdates],
+  };
+}
+
+function deserializeParsed(raw: any): ParsedTranscript {
+  return {
+    ...raw,
+    toolUses: new Map(raw.toolUses),
+    runningToolIds: new Set(raw.runningToolIds),
+    activeAgentIds: new Set(raw.activeAgentIds),
+    tasks: new Map(raw.tasks),
+    pendingTaskCreates: new Map(raw.pendingTaskCreates),
+    pendingTaskUpdates: new Map(raw.pendingTaskUpdates),
+  };
+}
+
+/**
+ * 디스크에 저장된 파싱 상태를 읽는다. 상태줄은 호출마다 새 프로세스라 메모리 캐시가
+ * 소용없으므로, offset 까지의 상태를 파일로 남겨 다음 실행이 새로 붙은 바이트만 읽게 한다.
+ * 파일이 줄었거나 offset 앞 지문이 다르면(다른 파일로 교체) 버린다.
+ */
+async function loadDiskCache(
+  transcriptPath: string,
+  fileSize: number
+): Promise<{ offset: number; data: ParsedTranscript } | null> {
+  const file = diskCacheFile(transcriptPath);
+  if (!file) return null;
+  try {
+    const raw = JSON.parse(await readFile(file, 'utf-8')) as DiskCacheFile;
+    if (raw.v !== DISK_CACHE_VERSION || raw.path !== transcriptPath) return null;
+    if (!(raw.offset >= 0 && raw.offset <= fileSize)) return null;
+    if ((await readFingerprint(transcriptPath, raw.offset)) !== raw.fingerprint) return null;
+    return { offset: raw.offset, data: deserializeParsed(raw.data) };
+  } catch {
+    return null;
+  }
+}
+
+async function saveDiskCache(
+  transcriptPath: string,
+  offset: number,
+  data: ParsedTranscript
+): Promise<void> {
+  const file = diskCacheFile(transcriptPath);
+  if (!file) return;
+  try {
+    await mkdir(FILE_CACHE_DIR, { recursive: true });
+    const payload: DiskCacheFile = {
+      v: DISK_CACHE_VERSION,
+      path: transcriptPath,
+      offset,
+      fingerprint: await readFingerprint(transcriptPath, offset),
+      data: serializeParsed(data),
+    };
+    const tmp = `${file}.${process.pid}.tmp`;
+    await writeFile(tmp, JSON.stringify(payload), 'utf-8');
+    await rename(tmp, file);
+  } catch {
+    // 캐시 실패는 무시 — 다음 실행이 다시 읽을 뿐이다
+  }
+}
+
 /**
  * Parse transcript JSONL file
- * Uses incremental parsing: only reads new bytes since last parse
+ * Uses incremental parsing: only reads new bytes since last parse (in-process
+ * memory cache, then cross-process disk cache). Reading is streamed so memory
+ * does not scale with transcript size.
  */
 export async function parseTranscript(
   transcriptPath: string
@@ -264,20 +437,27 @@ export async function parseTranscript(
         return cachedTranscript.data;
       }
 
-      const newContent = await readFromOffset(transcriptPath, cachedTranscript.size, fileSize);
-      processEntries(parseJsonlContent(newContent), cachedTranscript.data);
-      cachedTranscript.size = fileSize;
+      cachedTranscript.size = await streamEntries(
+        transcriptPath,
+        cachedTranscript.size,
+        fileSize,
+        cachedTranscript.data
+      );
 
       return cachedTranscript.data;
     }
 
-    // Full parse (first time or different/truncated file)
-    const content = await readFromOffset(transcriptPath, 0, fileSize);
-    const data = createParsedTranscript();
+    // 다른 프로세스가 남긴 디스크 캐시에서 이어 읽기 (없으면 처음부터)
+    const disk = await loadDiskCache(transcriptPath, fileSize);
+    const data = disk?.data ?? createParsedTranscript();
+    const startOffset = disk?.offset ?? 0;
 
-    processEntries(parseJsonlContent(content), data);
+    const endOffset = await streamEntries(transcriptPath, startOffset, fileSize, data);
 
-    cachedTranscript = { path: transcriptPath, size: fileSize, data };
+    cachedTranscript = { path: transcriptPath, size: endOffset, data };
+    if (endOffset !== startOffset || !disk) {
+      await saveDiskCache(transcriptPath, endOffset, data);
+    }
 
     return data;
   } catch {

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 // scripts/statusline.ts
-import { readFile as readFile9, stat as stat10 } from "fs/promises";
+import { readFile as readFile10, stat as stat10 } from "fs/promises";
 import { join as join6 } from "path";
 import { homedir as homedir6 } from "os";
 
@@ -569,7 +569,7 @@ function hashToken(token) {
 }
 
 // scripts/version.ts
-var VERSION = "1.32.0";
+var VERSION = "1.32.1";
 
 // scripts/utils/debug.ts
 var DEBUG = process.env.DEBUG === "claude-dashboard" || process.env.DEBUG === "1" || process.env.DEBUG === "true";
@@ -2714,7 +2714,8 @@ var sessionDurationWidget = {
 };
 
 // scripts/utils/transcript-parser.ts
-import { open as open2, stat as stat8 } from "fs/promises";
+import { open as open2, stat as stat8, readFile as readFile8, writeFile as writeFile4, mkdir as mkdir4, rename } from "fs/promises";
+import { createHash as createHash2 } from "crypto";
 import { basename as basename2 } from "path";
 var cachedTranscript = null;
 function createParsedTranscript() {
@@ -2733,18 +2734,6 @@ function createParsedTranscript() {
   };
 }
 var SLASH_COMMAND_TAG_RE = /<command-name>([^<]+)<\/command-name>/;
-function parseJsonlContent(content) {
-  const entries = [];
-  for (const line of content.split("\n")) {
-    if (!line)
-      continue;
-    try {
-      entries.push(JSON.parse(line));
-    } catch {
-    }
-  }
-  return entries;
-}
 function processEntries(entries, existing) {
   for (const entry of entries) {
     if (!existing.sessionStartTime && entry.timestamp) {
@@ -2865,17 +2854,145 @@ function processEntries(entries, existing) {
     }
   }
 }
-async function readFromOffset(filePath, offset, fileSize) {
-  const bytesToRead = fileSize - offset;
-  if (bytesToRead <= 0)
-    return "";
+var READ_CHUNK_BYTES = 1024 * 1024;
+var TAIL_FINGERPRINT_BYTES = 64;
+var DISK_CACHE_VERSION = 1;
+function isRelevantLine(line) {
+  return line.includes("tool_use") || line.includes("tool_result") || line.includes("customTitle") || line.includes('"user"');
+}
+async function streamEntries(filePath, offset, fileSize, data) {
+  if (fileSize <= offset)
+    return offset;
   const fd = await open2(filePath, "r");
   try {
-    const buffer = Buffer.alloc(bytesToRead);
-    await fd.read(buffer, 0, bytesToRead, offset);
-    return buffer.toString("utf-8");
+    const buffer = Buffer.alloc(READ_CHUNK_BYTES);
+    let pos = offset;
+    let carry = [];
+    let carryLen = 0;
+    let consumed = offset;
+    const handleLine = (lineBuf) => {
+      if (lineBuf.length === 0)
+        return true;
+      const line = lineBuf.toString("utf-8");
+      if (data.sessionStartTime && !isRelevantLine(line))
+        return true;
+      try {
+        processEntries([JSON.parse(line)], data);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    while (pos < fileSize) {
+      const want = Math.min(READ_CHUNK_BYTES, fileSize - pos);
+      const { bytesRead } = await fd.read(buffer, 0, want, pos);
+      if (bytesRead <= 0)
+        break;
+      const chunk = buffer.subarray(0, bytesRead);
+      let start = 0;
+      let nl = chunk.indexOf(10, start);
+      while (nl !== -1) {
+        const piece = chunk.subarray(start, nl);
+        const lineBuf = carryLen > 0 ? Buffer.concat([...carry, piece], carryLen + piece.length) : piece;
+        carry = [];
+        carryLen = 0;
+        handleLine(lineBuf);
+        start = nl + 1;
+        nl = chunk.indexOf(10, start);
+      }
+      consumed = pos + start;
+      if (start < bytesRead) {
+        const rest = Buffer.from(chunk.subarray(start));
+        carry.push(rest);
+        carryLen += rest.length;
+      }
+      pos += bytesRead;
+    }
+    if (carryLen > 0) {
+      const ok = handleLine(Buffer.concat(carry, carryLen));
+      if (ok)
+        consumed = pos;
+    }
+    return consumed;
   } finally {
     await fd.close();
+  }
+}
+async function readFingerprint(filePath, offset) {
+  if (offset <= 0)
+    return "";
+  const len = Math.min(TAIL_FINGERPRINT_BYTES, offset);
+  const fd = await open2(filePath, "r");
+  try {
+    const buf = Buffer.alloc(len);
+    const { bytesRead } = await fd.read(buf, 0, len, offset - len);
+    return buf.subarray(0, bytesRead).toString("hex");
+  } finally {
+    await fd.close();
+  }
+}
+function diskCacheFile(transcriptPath) {
+  if (process.env.CLAUDE_DASHBOARD_NO_TRANSCRIPT_CACHE)
+    return null;
+  const key = createHash2("sha256").update(transcriptPath).digest("hex").substring(0, 16);
+  return fileCachePath(`transcript-state-${key}.json`);
+}
+function serializeParsed(d) {
+  return {
+    ...d,
+    toolUses: [...d.toolUses],
+    runningToolIds: [...d.runningToolIds],
+    activeAgentIds: [...d.activeAgentIds],
+    tasks: [...d.tasks],
+    pendingTaskCreates: [...d.pendingTaskCreates],
+    pendingTaskUpdates: [...d.pendingTaskUpdates]
+  };
+}
+function deserializeParsed(raw) {
+  return {
+    ...raw,
+    toolUses: new Map(raw.toolUses),
+    runningToolIds: new Set(raw.runningToolIds),
+    activeAgentIds: new Set(raw.activeAgentIds),
+    tasks: new Map(raw.tasks),
+    pendingTaskCreates: new Map(raw.pendingTaskCreates),
+    pendingTaskUpdates: new Map(raw.pendingTaskUpdates)
+  };
+}
+async function loadDiskCache(transcriptPath, fileSize) {
+  const file = diskCacheFile(transcriptPath);
+  if (!file)
+    return null;
+  try {
+    const raw = JSON.parse(await readFile8(file, "utf-8"));
+    if (raw.v !== DISK_CACHE_VERSION || raw.path !== transcriptPath)
+      return null;
+    if (!(raw.offset >= 0 && raw.offset <= fileSize))
+      return null;
+    if (await readFingerprint(transcriptPath, raw.offset) !== raw.fingerprint)
+      return null;
+    return { offset: raw.offset, data: deserializeParsed(raw.data) };
+  } catch {
+    return null;
+  }
+}
+async function saveDiskCache(transcriptPath, offset, data) {
+  const file = diskCacheFile(transcriptPath);
+  if (!file)
+    return;
+  try {
+    await mkdir4(FILE_CACHE_DIR, { recursive: true });
+    const payload = {
+      v: DISK_CACHE_VERSION,
+      path: transcriptPath,
+      offset,
+      fingerprint: await readFingerprint(transcriptPath, offset),
+      data: serializeParsed(data)
+    };
+    const tmp = `${file}.${process.pid}.tmp`;
+    await writeFile4(tmp, JSON.stringify(payload), "utf-8");
+    await rename(tmp, file);
+  } catch {
   }
 }
 async function parseTranscript(transcriptPath) {
@@ -2886,15 +3003,22 @@ async function parseTranscript(transcriptPath) {
       if (cachedTranscript.size === fileSize) {
         return cachedTranscript.data;
       }
-      const newContent = await readFromOffset(transcriptPath, cachedTranscript.size, fileSize);
-      processEntries(parseJsonlContent(newContent), cachedTranscript.data);
-      cachedTranscript.size = fileSize;
+      cachedTranscript.size = await streamEntries(
+        transcriptPath,
+        cachedTranscript.size,
+        fileSize,
+        cachedTranscript.data
+      );
       return cachedTranscript.data;
     }
-    const content = await readFromOffset(transcriptPath, 0, fileSize);
-    const data = createParsedTranscript();
-    processEntries(parseJsonlContent(content), data);
-    cachedTranscript = { path: transcriptPath, size: fileSize, data };
+    const disk = await loadDiskCache(transcriptPath, fileSize);
+    const data = disk?.data ?? createParsedTranscript();
+    const startOffset = disk?.offset ?? 0;
+    const endOffset = await streamEntries(transcriptPath, startOffset, fileSize, data);
+    cachedTranscript = { path: transcriptPath, size: endOffset, data };
+    if (endOffset !== startOffset || !disk) {
+      await saveDiskCache(transcriptPath, endOffset, data);
+    }
     return data;
   } catch {
     return null;
@@ -3551,7 +3675,7 @@ var forecastWidget = {
 };
 
 // scripts/utils/budget.ts
-import { readFile as readFile8, mkdir as mkdir4, writeFile as writeFile4 } from "fs/promises";
+import { readFile as readFile9, mkdir as mkdir5, writeFile as writeFile5 } from "fs/promises";
 import { join as join5 } from "path";
 import { homedir as homedir4 } from "os";
 var BUDGET_DIR = join5(homedir4(), ".cache", "claude-dashboard");
@@ -3569,7 +3693,7 @@ async function loadBudgetState() {
   }
   const fresh = { date: today, dailyTotal: 0, sessions: {} };
   try {
-    const content = await readFile8(BUDGET_FILE, "utf-8");
+    const content = await readFile9(BUDGET_FILE, "utf-8");
     const state = JSON.parse(content);
     if (state.date !== today || !Number.isFinite(state.dailyTotal) || !state.sessions || typeof state.sessions !== "object") {
       return fresh;
@@ -3583,10 +3707,10 @@ async function loadBudgetState() {
 async function saveBudgetState(state) {
   try {
     if (!dirEnsured) {
-      await mkdir4(BUDGET_DIR, { recursive: true });
+      await mkdir5(BUDGET_DIR, { recursive: true });
       dirEnsured = true;
     }
-    await writeFile4(BUDGET_FILE, JSON.stringify(state), "utf-8");
+    await writeFile5(BUDGET_FILE, JSON.stringify(state), "utf-8");
     budgetCache = state;
   } catch (error) {
     debugLog("budget", "Failed to save budget state", error);
@@ -4221,7 +4345,7 @@ async function loadConfig() {
     if (configCache?.mtime === mtime) {
       return configCache.config;
     }
-    const content = await readFile9(CONFIG_PATH, "utf-8");
+    const content = await readFile10(CONFIG_PATH, "utf-8");
     const userConfig = JSON.parse(content);
     const config = {
       ...DEFAULT_CONFIG,
